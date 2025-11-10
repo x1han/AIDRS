@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq
 
 **AIDRS** (**AI-Aided Isoform Discovery for direct RNA-Seq) is an advanced sequencing data–driven framework for full-length RNA isoform reconstruction and quantification from Oxford Nanopore Technology Direct RNA sequencing. Inspired by [ISAtools](https://github.com/shizhuoxing/ISAtools), AIDRS extends the functionality with additional capabilities for protein coding potential prediction and translation site identification.
@@ -72,7 +71,3 @@ Upon successful execution, output files will appear in the default `aidrs_output
 - `*_flnc.ssc`: Read-level SSC file with alignment details.
 - `*_ssc.count`: Unique SSCs with aggregated read counts.
 - `anno.ssc`: Reference annotation converted into SSC format (if `-g` is provided).
-=======
-# AIDRA
-AIDRA: an AI-aided direct RNA-seq analysis tool
->>>>>>> 9aad47a052abef08cb9e4ba386ee2baa9e417966
