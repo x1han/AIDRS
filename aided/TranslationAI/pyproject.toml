@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "translationai"
+version = "1.0.0"
+description = "TranslationAI: An advanced deep learning framework for precise identification of translation start and end sites within mature mRNA sequences"
+readme = "README.md"
+license = "GPLv3"
+authors = [
+    {name = "Xiaojuan Fan", email = "xiaojuanfan05@gmail.com"}
+]
+maintainers = [
+    {name = "Xiaojuan Fan", email = "xiaojuanfan05@gmail.com"}
+]
+keywords = ["bioinformatics", "deep learning", "translation", "mRNA"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3 :: Only"
+]
+requires-python = ">=3.11"
+dependencies = [
+    "keras>=2.0.5",
+    "numpy>=1.14.0",
+    "pandas>=0.24.2"
+]
+
+[project.optional-dependencies]
+cpu = ["tensorflow>=1.2.0"]
+gpu = ["tensorflow-gpu>=1.2.0"]
+
+[project.urls]
+Homepage = "https://github.com/rnasys/TranslationAI"
+
+[project.scripts]
+translationai = "translationai.__main__:main"
+
+[tool.setuptools]
+packages = ["translationai"]
+
+[tool.setuptools.package-data]
+translationai = [
+    "models/translationAI_2000_l1.h5",
+    "models/translationAI_2000_l2.h5",
+    "models/translationAI_2000_l3.h5",
+    "models/translationAI_2000_l4.h5",
+    "models/translationAI_2000_l5.h5"
+]

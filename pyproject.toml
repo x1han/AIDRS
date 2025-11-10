@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aidrs"
+version = "1.0.0"
+description = "AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Xi Han", email = "han_xi@gzlab.ac.cn"}
+]
+maintainers = [
+    {name = "Xi Han", email = "han_xi@gzlab.ac.cn"}
+]
+keywords = ["bioinformatics", "RNA-seq", "direct RNA sequencing", "isoform reconstruction"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3 :: Only"
+]
+requires-python = ">=3.11"
+dependencies = [
+    "keras>=2.0.5",
+    "numpy>=1.14.0",
+    "pandas>=0.24.2",
+    "tensorflow>=1.2.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/x1han/AIDRS"
+Repository = "https://github.com/x1han/AIDRS"
+"Bug Tracker" = "https://github.com/x1han/AIDRS/issues"
+
+[project.scripts]
+aidrs = "aidrs:main_entry"
+translationai = "translationai.__main__:main"
+
+[tool.setuptools]
+packages = ["aidrs", "translationai"]
+
+[tool.setuptools.package-dir]
+"aidrs" = "src"
+"translationai" = "aided/TranslationAI/translationai"
+
+[tool.setuptools.package-data]
+translationai = [
+    "models/translationAI_2000_l1.h5",
+    "models/translationAI_2000_l2.h5",
+    "models/translationAI_2000_l3.h5",
+    "models/translationAI_2000_l4.h5",
+    "models/translationAI_2000_l5.h5"
+]

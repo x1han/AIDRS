@@ -1,0 +1,22 @@
+name: aidrs
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  - samtools
+  - pyarrow
+  - ml_dtypes
+  - selene-sdk
+  - optree
+  - networkx
+  - pysam
+  - psutil
+  - docopt
+  - pytorch=2.0
+  - torch-fftconv
+  - tensorflow=2.13
+  - keras
+  - polars=1.33
+  - gffutils
