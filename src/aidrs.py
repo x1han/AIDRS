@@ -7,16 +7,15 @@ import os
 import shutil
 import psutil
 import re
+import pandas as pd
 from .common import *
 from .consensus import ConsensusFilter
 from .gene_grouping import GeneClustering
 from .isoform_classify import IsoformClassifier
 from .remove_lowConfidence_junction import SpliceConsensusFilter
-from .NNC_NIC_filter import NncNicGraphProcessor
+from .SSC_graph_filter import SSCGraphFilter
 from .ISM_filter import TruncationProcessor
 from .get_terminal_sites import TerminalSitesProcessor
-from .gtf_rescue_filtering import GTFRescueFiltering
-from .SSC_assign import SSCAssign
 from .isoform_quantification import IsoformQuantifier
 from .generate_reports import IsoformAnnotator
 from .tss_annotation import TSS_Puffin
@@ -80,7 +79,7 @@ def isoform_assembling(bam, args, ref_anno=None):
     # Stage 1.5: Consensus-based Junction Refinement
     logger.info("\tStage 1.5: Refining splice junctions using consensus strategy...")
     consensusfilter = ConsensusFilter(consensus_bp = args.consensus_bp,
-                                      consensus_multiple = args.consensus_multiple,
+                                      consensus_ratio = args.consensus_ratio,
                                       num_processes=args.threads)
     df = consensusfilter.consensus(df)
     logger.info(f"\tConsensus refinement completed. Retained {len(df)} SSC records.")
@@ -98,39 +97,62 @@ def isoform_assembling(bam, args, ref_anno=None):
     df = filter_fragmentary_transcript(df, threshold_fragmentary_transcript_bp = args.threshold_fragmentary_transcript_bp)
     logger.info(f"\tFragmentary transcript filtering completed. Retained {len(df)} SSC records.")
 
+    df.to_parquet(os.path.join(args.output, f"temp/df.before_nnc_nic_graph.ssc_flnc.parquet"))
+
     # Stage 1.8: Novel Isoform Classification and Filtering (NNC/NIC)
     logger.info("\tStage 1.8: Classifying and filtering novel isoforms (NNC/NIC)...")
-    nncnicgraphprocessor = NncNicGraphProcessor(exon_excursion_diff_bp=args.exon_excursion_diff_bp, error_sites_diff_bp=args.error_sites_diff_bp,
-                                                error_sites_multiple=args.error_sites_multiple, little_exon_bp=args.little_exon_bp,
-                                                little_exon_mismatch_diff_bp=args.little_exon_mismatch_diff_bp, 
-                                                Nolittle_exon_mismatch_diff_bp=args.Nolittle_exon_mismatch_diff_bp,
-                                                little_exon_jump_multiple=args.little_exon_jump_multiple, 
-                                                num_processes = args.threads)
-    df = nncnicgraphprocessor.nnc_nic_graph(df)
-    
-    logger.info(f"\tNovel isoform filtering completed. Retained {len(df)} SSC records.")
-
-    # Stage 1.9: GTF Rescue FSM
+    df.to_parquet(os.path.join(args.output, f"temp/{sample}.ssc_flnc.before_nnc_nic_graph.parquet"))
+    ssc_graph_filter = SSCGraphFilter(
+                        error_sites_diff_bp=args.error_sites_diff_bp,
+                        error_sites_ratio=args.error_sites_ratio,
+                        error_sites_ratio_ref=args.error_sites_ratio_ref,
+                        little_exon_bp=args.little_exon_bp,
+                        little_exon_mismatch_diff_bp=args.little_exon_mismatch_diff_bp,
+                        Nonlittle_exon_mismatch_diff_bp=args.Nonlittle_exon_mismatch_diff_bp,
+                        little_exon_jump_ratio=args.little_exon_jump_ratio,
+                        little_exon_jump_ratio_ref=args.little_exon_jump_ratio_ref,
+                        Nonlittle_exon_jump_ratio=args.Nonlittle_exon_jump_ratio,
+                        Nonlittle_exon_jump_ratio_ref=args.Nonlittle_exon_jump_ratio_ref,
+                        fake_exon_group_freq_ratio=args.fake_exon_group_freq_ratio,
+                        fake_exon_group_freq_ratio_ref=args.fake_exon_group_freq_ratio_ref,
+                        fake_exon_bp=args.fake_exon_bp,
+                        num_processes=args.threads)
     if ref_anno is not None:
         df_raw = pd.read_parquet(os.path.join(args.output, f"temp/{sample}.ssc_flnc.parquet"))
-        gtf_rescue_filtering = GTFRescueFiltering(little_exon_bp=args.little_exon_bp,
-                                mismatch_error_sites_bp=args.mismatch_error_sites_bp, 
-                                mismatch_error_sites_groupfreq_multiple=args.mismatch_error_sites_groupfreq_multiple,
-                                exon_excursion_diff_bp=args.exon_excursion_diff_bp,
-                                fake_exon_group_freq_multiple=args.fake_exon_group_freq_multiple,
-                                fake_exon_bp=args.fake_exon_group_freq_multiple,
-                                ism_freqRatio_notrun = args.ism_freqRatio_notrun,
-                                cluster_group_size = args.cluster_group_size, eps = args.eps, min_samples = args.min_samples,
-                                num_processes = args.threads)
-        df = gtf_rescue_filtering.anno_process(df_raw,df,ref_anno)
-        logger.info(f"\tStage 1.9: GTF rescue completed. Retained {len(df)} SSC records.")
+        df = ssc_graph_filter.filter_ssc_graph(df_raw, df, ref_anno)
+    else:
+        df = ssc_graph_filter.filter_ssc_graph(df_raw = None, df=df, ref_anno = None)
     
+    # If mapping_to_reference is enabled, perform reference mapping
+    if args.mapping_to_reference and ref_anno is not None:
+        logger.info(f"\tMapping to reference ...")
+        df_raw = pd.read_parquet(os.path.join(args.output, f"temp/{sample}.ssc_flnc.parquet"))
+        
+        # Create MappingToReference instance, using _ref suffix parameters
+        from .mapping_to_reference import MappingToReference
+        refMapper = MappingToReference(
+            error_sites_ratio=args.error_sites_ratio_ref,
+            little_exon_jump_ratio=args.little_exon_jump_ratio_ref,
+            Nonlittle_exon_jump_ratio=args.Nonlittle_exon_jump_ratio_ref,
+            fake_exon_group_freq_ratio=args.fake_exon_group_freq_ratio_ref,
+            little_exon_bp=args.little_exon_bp,
+            mismatch_error_sites_bp=args.mismatch_error_sites_bp,
+            mismatch_error_sites_groupfreq_ratio=args.mismatch_error_sites_groupfreq_ratio,
+            exon_excursion_diff_bp=args.exon_excursion_diff_bp if hasattr(args, 'exon_excursion_diff_bp') else 20,
+            fake_exon_bp=args.fake_exon_bp,
+            num_processes=args.threads)
+        
+        # Call main processing function
+        df = refMapper.map_to_reference(df_raw, df, ref_anno)
+        
     df.to_parquet(os.path.join(args.output, f"temp/{sample}.ssc_flnc_correct.parquet"))
+    
+    logger.info(f"\tGraph-based isoform filtering completed. Retained {len(df)} SSC records.")
 
     return df, sample
 
 
-def isoform_validating(df, args):
+def isoform_validating(df, args, ref_anno=None):
     """
     Isoform validation pipeline: stages 9-12 (terminal site prediction, 
     functional annotation, truncation analysis, and filtering).
@@ -166,7 +188,8 @@ def isoform_validating(df, args):
         cluster_group_size=args.cluster_group_size,
         eps=args.eps,
         min_samples=args.min_samples,
-        num_processes=args.threads
+        num_processes=args.threads,
+        extrem_terminal=args.extrem_terminal
     )
     df = terminalsitesprocessor.get_terminal_sites(df)
     logger.info(f"Transcript start/end prediction completed. Retained {len(df)} SSC records.")
@@ -177,7 +200,7 @@ def isoform_validating(df, args):
     puffin_tss.tss_anno_by_puffin(df)
     df = puffin_tss.aggr_puffin_result(df, f'{args.output}/temp/puffin_out')
 
-    logger.info("Stage 2.3: Performing PolyA fraction and quantification...")
+    logger.info("Stage 2.3: Performing PolyA fraction and length estimation...")
     polyanno = polyAnnotator(args)
     df = polyanno.anno_polya(df, flnc_paths)
 
@@ -189,15 +212,16 @@ def isoform_validating(df, args):
 
     logger.info("Stage 2.5: Performing Truncation assessment...")
     truncationprocessor = TruncationProcessor(
-        threshold_logFC_truncation_source_freq=args.threshold_logFC_truncation_source_freq,
-        threshold_logFC_truncation_group_freq=args.threshold_logFC_truncation_group_freq,
+        threshold_truncation_source_freq=args.threshold_truncation_source_freq,
+        threshold_truncation_group_freq=args.threshold_truncation_group_freq,
+        trunc_simp_filter=args.trunc_simp_filter,
         num_processes=args.threads
     )
-    df = truncationprocessor.get_truncation(df)
-    df = truncationprocessor.tag_truncation(df)
+    df = truncationprocessor.assess_truncation(df, ref_anno)
 
     # Stage 2.6: Isoform Filtering
     logger.info("Stage 2.6: Applying TSS correction and filtering...")
+    df.to_csv(os.path.join(args.output,'temp/aidrs.transcript.result_df.before_filter.tsv'),sep='\t', index=False)
     df = transcript_model_filtering(df, args.puffin_prediction_threshold, args.polya_fraction_threshold, args.hard_filter)
     logger.info(f"TSS correction and filtering completed. Retained {len(df)} records.")
 
@@ -274,56 +298,11 @@ def run_pipeline(args, ref_anno=None):
 
     merged_df['frequency'] = merged_df[freq_cols].sum(axis=1).astype(int)
 
-
-
     # === Step 5: Validation pipeline (boundary prediction, functional annotation, truncation analysis) ===
-    df_transcript_model = isoform_validating(merged_df, args)
+    df_transcript_model = isoform_validating(merged_df, args, ref_anno)
 
-    # === Step 6: Quantify each sample ===
-    quantifier = IsoformQuantifier(num_processes=args.threads)
-    quant_list = []
-
-    for sample in df_dict.keys():
-        # Fix path: using f-string formatting
-        flnc_path = os.path.join(args.output, f"temp/{sample}.ssc_flnc_correct.parquet")
-        read_df = pd.read_parquet(flnc_path)
-        
-        # Correction + quantification
-        read_df = correct_flnc(df_transcript_model, read_df, args=args, terminal_cluster=True)
-        read_df = quantifier.assign_quantification(read_df, flnc_path)
-        read_df['sample'] = sample
-        # Remove 'Group' column (if exists)
-        if 'Group' in read_df.columns:
-            read_df = read_df.drop(columns=['Group'])
-        quant_list.append(read_df)
-
-    # Merge all quantification results
-    df_quant = pd.concat(quant_list, ignore_index=True)
-
-
-    # === Step 7: Left join df_quant based on df_transcript_model as reference ===
-    # Columns to retain: Chr, Strand, SSC, TrStart, TrEnd and other functional annotation columns
-    model_cols = ['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'Puffin_TSS_15bp', 'Puffin_TSS_50bp', 'polyA_frac', 'TIS_related_location', 'TTS_related_location', 'Predict_NMD', 'truncation']
     
-    # Ensure df_transcript_model has these columns
-    if not set(model_cols).issubset(df_transcript_model.columns):
-        raise ValueError(f"df_transcript_model is missing required columns: {set(model_cols) - set(df_transcript_model.columns)}")
-
-    # Key columns for joining (must exist in df_quant)
-    merge_keys = ['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']
-    
-    # Ensure df_quant has the key columns
-    if not set(merge_keys).issubset(df_quant.columns):
-        raise ValueError(f"df_quant is missing key columns: {set(merge_keys) - set(df_quant.columns)}")
-
-    # Left join: retain all rows and model_cols columns from df_transcript_model, join with df_quant by merge_keys
-    df_final = df_transcript_model[model_cols].merge(
-        df_quant,
-        on=merge_keys,
-        how='inner'
-    )
-
-    return df_final
+    return df_transcript_model
 
 
 def parse_args(cmd_args):
@@ -345,39 +324,47 @@ def parse_args(cmd_args):
 
     # Consensus filtering
     parser.add_argument("--consensus_bp", type=int, default=20, help="Allowed deviation (bp) in consensus correction. Default: 20")
-    parser.add_argument("--consensus_multiple", type=float, default=0.1, help="Supporting read ratio for consensus correction. Default: 0.1")
+    parser.add_argument("--consensus_ratio", type=float, default=0.1, help="Supporting read ratio for consensus correction. Default: 0.1")
 
     # Graph edge filtering
     parser.add_argument("--threshold_lowWeight_edges", type=float, default=0.05, help="Threshold ratio for filtering weak edges. Default: 0.05")
 
     # NNC/NIC filtering
-    parser.add_argument("--exon_excursion_diff_bp", type=int, default=20, help="Maximum exon position deviation allowed. Default: 20")
+    # parser.add_argument("--exon_excursion_diff_bp", type=int, default=20, help="Maximum exon position deviation allowed. Default: 20")
     parser.add_argument("--error_sites_diff_bp", type=int, default=10, help="Max position deviation for suspected error sites. Default: 10")
-    parser.add_argument("--error_sites_multiple", type=float, default=0.01, help="Read ratio threshold for error site detection. Default: 0.01")
+    parser.add_argument("--error_sites_ratio", type=float, default=0.05, help="Read ratio threshold for error site detection (no ref). Default: 0.05")
+    parser.add_argument("--error_sites_ratio_ref", type=float, default=0.1, help="Read ratio threshold for error site detection (with ref). Default: 0.1")
     parser.add_argument("--little_exon_bp", type=int, default=30, help="Maximum size for a small exon. Default: 30")
     parser.add_argument("--little_exon_mismatch_diff_bp", type=int, default=10, help="Position difference for mismatch in small exons. Default: 10")
-    parser.add_argument("--Nolittle_exon_mismatch_diff_bp", type=int, default=20, help="Mismatch difference threshold for non-small exons. Default: 20")
-    parser.add_argument("--little_exon_jump_multiple", type=float, default=0.1, help="Ratio threshold for exon skipping detection. Default: 0.1")
+    parser.add_argument("--Nonlittle_exon_mismatch_diff_bp", type=int, default=20, help="Mismatch difference threshold for non-small exons. Default: 20")
+    parser.add_argument("--little_exon_jump_ratio", type=float, default=0.05, help="Ratio threshold for exon skipping detection (no ref). Default: 0.05")
+    parser.add_argument("--little_exon_jump_ratio_ref", type=float, default=0.1, help="Ratio threshold for exon skipping detection (with ref). Default: 0.1")
+    parser.add_argument("--Nonlittle_exon_jump_ratio", type=float, default=0.05, help="Ratio threshold for non-small exon skipping detection (no ref). Default: 0.05")
+    parser.add_argument("--Nonlittle_exon_jump_ratio_ref", type=float, default=0.1, help="Ratio threshold for non-small exon skipping detection (with ref). Default: 0.1")
 
     # ISM truncation filtering
-    parser.add_argument("--threshold_logFC_truncation_source_freq", type=float, default=0, help="logFC threshold of source SSCs for truncation. Default: 0")
-    parser.add_argument("--threshold_logFC_truncation_group_freq", type=float, default=-100, help="logFC threshold for group truncation filtering. Default: -100")
+    parser.add_argument("--threshold_truncation_source_freq", type=float, default=0.5, help="Ratio threshold of source SSCs for truncation. Default: 0.5")
+    parser.add_argument("--threshold_truncation_group_freq", type=float, default=0.5, help="Ratio threshold for group truncation filtering. Default: 0.5")
+    parser.add_argument("--trunc_simp_filter", action="store_true", help="Apply simple truncation filtering (remove truncated transcripts). Default: False")
 
     # Fragmentary transcript filtering
     parser.add_argument("--threshold_fragmentary_transcript_bp", type=int, default=100, help="Minimum length required to retain transcript. Default: 100")
 
     # Annotation-based filtering
     parser.add_argument("--gtf_anno", "-g", type=str, default=None, help="Optional GTF/GFF file for annotation-based transcript rescue and filtering.")
+    parser.add_argument("--mapping_to_reference", action="store_true", help="Enable mapping to reference annotation for improved accuracy")
     parser.add_argument("--mismatch_error_sites_bp", type=int, default=20, help="Max deviation to define mismatched error sites. Default: 20")
-    parser.add_argument("--mismatch_error_sites_groupfreq_multiple", type=float, default=0.25, help="Read ratio threshold for mismatch errors. Default: 0.25")
-    parser.add_argument("--fake_exon_group_freq_multiple", type=float, default=0.1, help="Group ratio threshold for fake exon detection. Default: 0.1")
+    parser.add_argument("--mismatch_error_sites_groupfreq_ratio", type=float, default=0.25, help="Read ratio threshold for mismatch errors. Default: 0.25")
     parser.add_argument("--fake_exon_bp", type=int, default=50, help="Max length of a potential fake exon. Default: 50")
-    parser.add_argument("--ism_freqRatio_notrun", type=float, default=0.5, help="Minimum ratio to retain non-truncated ISMs. Default: 0.5")
+    parser.add_argument("--fake_exon_group_freq_ratio", type=float, default=0.1, help="Group ratio threshold for fake exon detection (no ref). Default: 0.1")
+    parser.add_argument("--fake_exon_group_freq_ratio_ref", type=float, default=0.2, help="Group ratio threshold for fake exon detection (with ref). Default: 0.2")
+    # parser.add_argument("--ism_freqRatio_notrun", type=float, default=0.5, help="Minimum ratio to retain non-truncated ISMs. Default: 0.5")
 
     # Transcription start/end prediction
     parser.add_argument("--cluster_group_size", type=int, default=1500, help="Max group size for TS clustering. Default: 1500")
     parser.add_argument("--eps", type=int, default=15, help="DBSCAN epsilon (distance threshold). Default: 15")
     parser.add_argument("--min_samples", type=int, default=20, help="Minimum samples for TS cluster. Default: 20")
+    parser.add_argument("--extrem_terminal", action="store_true", help="Use extreme terminal sites instead of representative sites. Default: False")
     parser.add_argument("--puffin_prediction_threshold", type=float, default=0.02, help="Puffin prediction threshold for TSS annotation and filtering. Default: 0.02")
     parser.add_argument("--polya_fraction_threshold", type=float, default=0.95, help="PolyA fraction threshold for transcript filtering. Default: 0.95")
     parser.add_argument("--translationai_score_threshold", type=float, default=0.9, help="TranslationAI score threshold for ORF prediction. Default: 0.9")
@@ -386,6 +373,11 @@ def parse_args(cmd_args):
     # Thresholds for splice site (SS) and transcription start/end site (TSS/TES) correction
     parser.add_argument("--ss_tolerance", type=int, default=15, help="Splice site tolerance threshold for correction. Default: 15")
     parser.add_argument("--terminal_tolerance", type=int, default=50, help="Terminal site (TSS/TES) tolerance threshold for correction. Default: 50")
+    
+    # Quantification options
+    parser.add_argument("--include_low_quality", action="store_true", help="Include low-quality reads in quantification")
+    parser.add_argument("--use_truncate_weight", action="store_true", help="Use truncate weights for quantification (only relevant when --include_low_quality is set)")
+    parser.add_argument("--min_samples_expr", type=int, default=1, help="Minimum number of samples with expression to retain transcript in count matrix. Default: 1")
 
     args = parser.parse_args(cmd_args)
     return args
@@ -407,6 +399,7 @@ def main(cmd_args):
         if args.gtf_anno:
             run_Ref2SSC(args.gtf_anno, args.output, args.threads)
             ref_anno = pd.read_csv(f"{args.output}/temp/anno.ssc",sep='\t')
+            if ref_anno['GeneName'].isna().all(): ref_anno['GeneName'] = ref_anno['GeneID']
             ref_anno = ref_anno[ref_anno['SSC'].notna()]
         else:
             ref_anno = None
@@ -417,8 +410,10 @@ def main(cmd_args):
             df_result = run_pipeline(args,ref_anno)
 
         logger.info("Stage 3: Output Generating...")
-        annotator = IsoformAnnotator(num_processes=args.threads, terminal_tolerance=args.terminal_tolerance)
-        annotator.save_results(df_result,args.output,args.reference,ref_anno)
+        # Pass quantification parameters to IsoformAnnotator
+        annotator = IsoformAnnotator(num_processes=args.threads, 
+                                     terminal_tolerance=args.terminal_tolerance)
+        annotator.save_results(df_result,args.output,args.reference,ref_anno,args)
 
         if not args.keep_temp:
             temp_dir = os.path.join(args.output, "temp")

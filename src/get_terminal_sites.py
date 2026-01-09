@@ -7,13 +7,14 @@ from scipy.spatial.distance import cdist
 from collections import Counter
 
 class TerminalSitesProcessor:
-    def __init__(self, cluster_group_size=1500, eps=15, min_samples=20, num_processes=10):
+    def __init__(self, cluster_group_size=1500, eps=15, min_samples=20, num_processes=10, extrem_terminal=False):
         self.cluster_group_size = cluster_group_size
         self.eps = eps
         self.min_samples = min_samples
         self.num_processes = num_processes
+        self.extrem_terminal = extrem_terminal
 
-    def get_representative_sites_DBSCAN(self, values, mode='min', five_prime = False):
+    def get_representative_sites_DBSCAN(self, values, mode='min', extrem_terminal=False):
         if len(values) >= self.cluster_group_size:
             values = values.sample(n=self.cluster_group_size, random_state=42)
 
@@ -24,7 +25,7 @@ class TerminalSitesProcessor:
         df = pd.DataFrame({'value': values, 'cluster': labels})
         valid_clusters = [c for c in df['cluster'].unique() if c != -1]
 
-        if five_prime:
+        if self.extrem_terminal:
             if not valid_clusters:
                 return sorted(set([df['value'].min()])) if mode == 'min' else sorted(set([df['value'].max()]))
             else:
@@ -57,11 +58,11 @@ class TerminalSitesProcessor:
             strand = row['Strand']
 
             if strand == '+':
-                pred_starts = self.get_representative_sites_DBSCAN(starts, mode='min', five_prime = True)
-                pred_ends = self.get_representative_sites_DBSCAN(ends, mode='max')
+                pred_starts = self.get_representative_sites_DBSCAN(starts, mode='min', extrem_terminal=self.extrem_terminal)
+                pred_ends = self.get_representative_sites_DBSCAN(ends, mode='max', extrem_terminal=False)
             else:
-                pred_starts = self.get_representative_sites_DBSCAN(starts, mode='min')
-                pred_ends = self.get_representative_sites_DBSCAN(ends, mode='max', five_prime = True)
+                pred_starts = self.get_representative_sites_DBSCAN(starts, mode='min', extrem_terminal=False)
+                pred_ends = self.get_representative_sites_DBSCAN(ends, mode='max', extrem_terminal=self.extrem_terminal)
 
             raw_pairs = set(zip(row['TrStart_reads'], row['TrEnd_reads']))
 

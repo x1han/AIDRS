@@ -87,7 +87,16 @@ class polyAnnotator:
                 continue
 
             read_df = read_flnc(flnc_file)
-            read_df = correct_flnc(df, read_df, args=self.args)
+            # Create a temporary args object with terminal_tolerance set to double the original value
+            if self.args is not None and hasattr(self.args, 'terminal_tolerance'):
+                # Create a copy of args and modify the terminal_tolerance value
+                import argparse
+                temp_args = argparse.Namespace(**vars(self.args))
+                temp_args.terminal_tolerance = self.args.terminal_tolerance * 2
+                read_df = correct_flnc(df, read_df, args=temp_args)
+            else:
+                # If args is not provided or does not have terminal_tolerance attribute, use default behavior
+                read_df = correct_flnc(df, read_df, args=self.args)
             dir_name = os.path.dirname(flnc_file)                # Original directory
             base_name = os.path.basename(flnc_file)
             out_name = re.sub(r'_flnc\.ssc$', '_flnc_correct.ssc', base_name)

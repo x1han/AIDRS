@@ -2,16 +2,20 @@ import pandas as pd
 import numpy as np
 from multiprocessing import Pool
 from functools import partial
+import logging
+
+logger = logging.getLogger("AIDRS")
 
 class TruncationProcessor:
-    def __init__(self, threshold_logFC_truncation_source_freq=0.5, threshold_logFC_truncation_group_freq=0.5,num_processes = 10):
-        self.threshold_logFC_truncation_source_freq = threshold_logFC_truncation_source_freq
-        self.threshold_logFC_truncation_group_freq = threshold_logFC_truncation_group_freq
+    def __init__(self, threshold_truncation_source_freq=0.5, threshold_truncation_group_freq=0.5, trunc_simp_filter=False, num_processes=10):
+        self.threshold_truncation_source_freq = threshold_truncation_source_freq
+        self.threshold_truncation_group_freq = threshold_truncation_group_freq
+        self.trunc_simp_filter = trunc_simp_filter
         self.num_processes = num_processes
 
-    def _get_truncation_for_Chr(self, df_clustered_Chr):
+    def _assess_truncation_for_Chr(self, df_clustered_Chr):
         df = df_clustered_Chr.copy()
-        df['sourceIso_num'] = 0
+        df['sourceSSC_counts'] = 0
         df['trun_source_freq'] = 0
 
         grouped_dict = {}
@@ -21,50 +25,73 @@ class TruncationProcessor:
 
         for index, row in df.iterrows():
             key = (row['Chr'], row['Strand'], row['Group'])
-            sourceIso_num = 0
+            sourceSSC_counts = 0
             trun_source_freq = 0
             truncation_source = []
             for other_row in grouped_dict[key]:
                 if row['SSC'] != other_row['SSC'] and row['SSC'] in other_row['SSC']:
-                    sourceIso_num += 1
+                    sourceSSC_counts += 1
                     trun_source_freq += other_row['frequency']
                     truncation_source.append(other_row['SSC'])
 
-            df.at[index, 'sourceIso_num'] = sourceIso_num
+            df.at[index, 'sourceSSC_counts'] = sourceSSC_counts
             df.at[index, 'trun_source_freq'] = trun_source_freq
-            df.at[index, 'truncation_source'] = ','.join(truncation_source) if truncation_source else 'n'
+            df.at[index, 'truncation_source'] = ','.join(truncation_source) if truncation_source else 'full'
         return df
 
-    def get_truncation(self, df_clustered):
+    def assess_truncation(self, df_clustered, ref_anno=None):
         Chr_groups = df_clustered.groupby(['Chr','Strand'],observed=True)
         Chr_list = [group for _, group in Chr_groups]
 
         with Pool(self.num_processes) as pool:
-            results = pool.map(self._get_truncation_for_Chr, Chr_list)
+            results = pool.map(self._assess_truncation_for_Chr, Chr_list)
 
-        return pd.concat(results)
-
-    def tag_truncation(self, df1):
-        df = df1.copy()
-        df['logFC_source_freq'] = np.where(
-            df['truncation_source'] != 'n',
-            np.log10(df['frequency']) - np.log10(df['trun_source_freq'] + 1e-10),
+        df = pd.concat(results)
+        
+        # Calculate ratios instead of logFC
+        df['source_freq_ratio'] = np.where(
+            df['truncation_source'] != 'full',
+            df['frequency'] / (df['frequency'] + df['trun_source_freq']),
             np.inf
         )
         df['group_freq'] = df.groupby(['Chr', 'Strand', 'Group'],observed=True)['frequency'].transform('sum')
-        df['logFC_group_freq'] = np.where(
-            df['truncation_source'] != 'n',
-            np.log10(df['frequency']) - np.log10(df['group_freq'] + 1e-10),
+        df['group_freq_ratio'] = np.where(
+            df['truncation_source'] != 'full',
+            df['frequency'] / (df['frequency'] + df['group_freq']),
             np.inf
         )
 
         def truncation_classify(row):
-            if row['logFC_source_freq'] >= self.threshold_logFC_truncation_source_freq and \
-               row['logFC_group_freq'] >= self.threshold_logFC_truncation_group_freq:
+            if row['source_freq_ratio'] >= self.threshold_truncation_source_freq and \
+               row['group_freq_ratio'] >= self.threshold_truncation_group_freq:
                 return 'no'
             else:
                 return 'yes'
 
         df['truncation'] = df.apply(truncation_classify, axis=1)
-        # df = df[df['truncation'] == 'no']
-        return df.drop(columns=['group_freq', 'sourceIso_num', 'trun_source_freq', 'logFC_source_freq','logFC_group_freq','truncation_source']).reset_index(drop=True)
+        
+        # Apply simple filter if enabled
+        if self.trunc_simp_filter:
+            if ref_anno is not None:
+                # If reference annotation is provided, classify isoforms and keep 'no' or 'FSM'
+                from .isoform_classify import IsoformClassifier
+                isoformclassifier = IsoformClassifier(num_processes=self.num_processes)
+                df = isoformclassifier.add_category(df, ref_anno)
+                original_count = len(df)
+                df = df[(df['truncation'] == 'no') | (df['category'] == 'FSM')]
+                filtered_count = len(df)
+                logger.info(f"\tTruncation filtered: Retained {filtered_count} of {original_count} transcripts ({filtered_count/original_count*100:.2f}%).")
+                # Remove the category column as it's no longer needed
+                if 'category' in df.columns:
+                    df = df.drop(columns=['category'])
+            else:
+                # If no reference annotation, only keep 'no'
+                original_count = len(df)
+                df = df[df['truncation'] == 'no']
+                filtered_count = len(df)
+                logger.info(f"\tTruncation filtered: Retained {filtered_count} of {original_count} transcripts ({filtered_count/original_count*100:.2f}%).")
+        
+        # Drop temporary columns
+        df = df.drop(columns=['group_freq', 'sourceSSC_counts', 'trun_source_freq', 'source_freq_ratio', 'group_freq_ratio', 'truncation_source']).reset_index(drop=True)
+        
+        return df

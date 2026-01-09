@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from functools import partial
 from multiprocessing import Pool
-from typing import Optional, Dict, List, Union, Tuple
+from typing import Optional, Dict, List, Union, Tuple, Any
 from collections import defaultdict
 import glob
 import polars as pl
@@ -15,6 +15,7 @@ import pyfaidx
 
 from .common import read_flnc
 from .gene_grouping import GeneClustering 
+from .isoform_quantification import IsoformQuantifier
 
 class IsoformAnnotator:
     """
@@ -32,7 +33,8 @@ class IsoformAnnotator:
                      df_result: pd.DataFrame,
                      output_dir: str,
                      reference: str, 
-                     ref_anno: Optional[pd.DataFrame] = None, ) -> None:
+                     ref_anno: Optional[pd.DataFrame] = None,
+                     args: Optional[Any] = None) -> None:
         os.makedirs(output_dir, exist_ok=True)
         # ---- 1. Annotation ----
         df_result.to_csv(os.path.join(output_dir,
@@ -40,39 +42,111 @@ class IsoformAnnotator:
                             sep='\t', index=False)
         annotated_df = self.annotate(df_result, ref_anno, self.num_processes)
         annotated_df.to_csv(os.path.join(output_dir,
+                                         'temp/aidrs.transcript.annotated_df.before_quantification.tsv'),
+                            sep='\t', index=False)
+        
+        # ---- 2. Quantification ----        
+        # Extract sample names from args.bam
+        sample_names = []
+        if args is not None and hasattr(args, 'bam'):
+            # Extract sample names using the same method as in isoform_assembling function
+            sample_names = [os.path.splitext(os.path.basename(bam))[0] for bam in args.bam]
+        
+        # Get quantification parameters from args
+        include_low_quality = getattr(args, 'include_low_quality', False) if args is not None else False
+        use_truncate_weight = getattr(args, 'use_truncate_weight', False) if args is not None else False
+        min_samples_expr = getattr(args, 'min_samples_expr', 1) if args is not None else 1
+        
+        # Create quantifier with options
+        quantifier = IsoformQuantifier(
+            include_low_quality=include_low_quality,
+            use_truncate_weight=use_truncate_weight,
+            num_processes=self.num_processes,
+            min_samples_expr=min_samples_expr
+        )
+        
+        # Only proceed with quantification if we have sample names
+        quantification_success = False
+        if sample_names:
+            try:
+                # Quantify all samples
+                quantification_matrices = quantifier.quantify_all_samples(
+                    sample_names, 
+                    annotated_df, 
+                    output_dir
+                )
+                
+                # Intersect matrices with model
+                quantification_matrices, filtered_annotated_df, df_quant = quantifier.intersect_matrices_with_model(
+                    quantification_matrices, annotated_df
+                )
+                
+                # Save quantification matrices
+                for name, matrix in quantification_matrices.items():
+                    output_path = os.path.join(output_dir, f'aidrs_{name}.tsv')
+                    matrix.to_csv(output_path, sep='\t')
+                    
+                # Update annotated_df with the filtered version
+                annotated_df = filtered_annotated_df
+                quantification_success = True
+            except Exception as e:
+                print(f"Warning: Quantification failed: {e}")
+        
+        annotated_df.to_csv(os.path.join(output_dir,
                                          'temp/aidrs.transcript.annotated_df.tsv'),
                             sep='\t', index=False)
-        # ---- 2. Output GTF ----
-        self.to_gtf(annotated_df, output_dir)
-        # ---- 2. Output FASTA ----
-        self.to_fasta(os.path.join(output_dir, 'aidrs.transcript_model.gtf'), reference, output_dir)
-        # ---- 3. Merge annotation information back to original data for quantification ----
-        # Merge annotation information back to original data
-        merge_cols = ['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']
-        df_for_quant = df_result.merge(
-            annotated_df[merge_cols + ['TrID', 'GeneID', 'GeneName']],
-            on=merge_cols,
-            how='left'
+        # Merge df_result and annotated_df, keeping only one copy of duplicate columns
+        # Common columns between df_result and annotated_df
+        common_cols = ['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']
+        # Columns unique to annotated_df that we want to add
+        annotated_cols = ['TrID', 'GeneID', 'GeneName']
+        
+        # Merge the dataframes on common columns
+        df_result_after_quant = df_result.merge(
+            annotated_df[common_cols + annotated_cols],
+            on=common_cols,
+            how='inner'
         )
-        df_for_quant['sites'] = df_for_quant.apply(
+        df_result_after_quant.to_csv(os.path.join(output_dir,
+                                         'temp/aidrs.transcript.assessment.tsv'),
+                            sep='\t', index=False)
+        # ---- 3. Output GTF ----
+        self.to_gtf(annotated_df, output_dir)
+        # ---- 4. Output FASTA ----
+        df_result_after_quant = self.to_fasta(os.path.join(output_dir, 'aidrs.transcript_model.gtf'), reference, output_dir, df_result_after_quant)
+        
+        # Expand df_result_after_quant with a 'sample' column
+        # For each sample, duplicate df_result_after_quant and add the sample name as a column
+        if sample_names:
+            # Create a list to hold dataframes for each sample
+            sample_dfs = []
+            for sample in sample_names:
+                # Copy df_result_after_quant and add sample column
+                sample_df = df_result_after_quant.copy()
+                sample_df['sample'] = sample
+                sample_dfs.append(sample_df)
+            
+            # Concatenate all sample dataframes
+            if sample_dfs:
+                df_result_after_quant = pd.concat(sample_dfs, ignore_index=True)
+            else:
+                # If no sample dataframes were created, add an empty sample column
+                df_result_after_quant['sample'] = ''
+
+        df_result_after_quant['sites'] = df_result_after_quant.apply(
             lambda r: sorted(
                 list(map(int, r['SSC'].split('-'))) +
                 [int(r['TrStart']), int(r['TrEnd'])]
             ), axis=1
         )
-        # ---- 4. Quantification ----
-        quant_tables = self.quantify(df_for_quant)
-        for name, table in quant_tables.items():
-            table.to_csv(os.path.join(output_dir, f'aidrs_{name}.tsv'),
-                         sep='\t')
-        df_for_quant, polyA_tables = self.polyA_len_profile(df_for_quant, output_dir)
+        
+        df_result_after_quant, polyA_tables = self.polyA_len_profile(df_result_after_quant, output_dir)
         for name, table in polyA_tables.items():
             table.to_csv(os.path.join(output_dir, f'aidrs_{name}.tsv'),
                          sep='\t')
-        # ---- 5. Original assessment table ----
-        df_for_quant.to_csv(os.path.join(output_dir,
-                                     'aidrs.transcript.assessment.tsv'),
-                        sep='\t', index=False)
+        # ---- 6. Original assessment table ----
+        df_result_after_quant[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'frequency', 'Puffin_TSS_15bp', 'Puffin_TSS_50bp', 'polyA_frac', 'TIS_related_location', 'TTS_related_location', 'TIS_score', 'TTS_score', 'Predict_NMD', 'truncation', 'TrID', 'GeneID', 'GeneName', 'seq_len']].drop_duplicates().to_csv(os.path.join(output_dir,
+                      'aidrs.transcript.assessment.tsv'), sep='\t', index=False)
 
 
     # ------------------------------------------------------------------
@@ -89,10 +163,11 @@ class IsoformAnnotator:
             ['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd'],
             observed=True
         ).ngroup().astype(str)
-        df_unique = df[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'uniqueTr', 'TIS_related_location', 'TTS_related_location', 'Predict_NMD']].drop_duplicates()
+        df_unique = df[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'frequency', 'uniqueTr', 'TIS_related_location', 'TTS_related_location', 'Predict_NMD']].drop_duplicates()
         # 3.2 Cluster to get Group
         gene_clustering = GeneClustering(num_processes=num_processes)
         df_unique = gene_clustering.cluster(df_unique)
+        
         # 3.3 Merge with reference annotation
         if ref_anno is not None:
             ref_anno_model = ref_anno[
@@ -106,26 +181,53 @@ class IsoformAnnotator:
             )
         else:
             merged = df_unique.copy()
+        
         # 3.4 Run concurrently by Group
         df_groups = [g for _, g in merged.groupby('Group', observed=True)]
         with Pool(num_processes) as pool:
-            func = partial(self.annotate_one_group, ref_anno=ref_anno)
+            # Use static method instead of instance method to solve multiprocessing serialization issues            
+            func = partial(IsoformAnnotator._annotate_one_group, ref_anno=ref_anno, terminal_tolerance=self.terminal_tolerance)
             results = pool.map(func, df_groups)
+        # Handle case where results is empty
+        
+        if not results:
+            # Create empty dataframe with expected columns
+            empty_df = pd.DataFrame(columns=['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'frequency', 'uniqueTr', 'TIS_related_location', 'TTS_related_location', 'Predict_NMD', 'Group', 'TrID', 'GeneID', 'GeneName', 'TrStart_ref', 'TrEnd_ref'])
+            return empty_df
         final_df = pd.concat(results, ignore_index=True)
+        
         # 3.5 Deduplicate key
+        def merge_fusion_genes(df):
+            df['tr_key'] = (
+                df['Chr'].astype(str) + df['Strand'].astype(str) + ':' + 
+                df['TrStart'].astype(str) + '-' + df['SSC'].astype(str) + '-' + 
+                df['TrEnd'].astype(str)
+            )
+            agg_rules = {}
+            for col in df.columns:
+                if col == 'tr_key': continue
+                if col in ['GeneID', 'GeneName']:
+                    agg_rules[col] = lambda x: '-'.join(x.astype(str).unique())
+                else:
+                    agg_rules[col] = 'first'
+            return df.groupby('tr_key', as_index=False).agg(agg_rules).drop(columns=['tr_key'])
+        
+        final_df = merge_fusion_genes(final_df) # Gene fusion
+
         final_df['key'] = final_df['TrID']
         cnt = final_df.groupby('key').cumcount().add(1).astype(str)
         final_df['TrID'] = np.where(
             cnt != '1',
             final_df['TrID'] + '_' + cnt,
             final_df['TrID']
-        )
+        ) # Multiple terminal isoforms
         final_df = final_df.drop(columns=['key'])
+
         if ref_anno is not None:
             return self._novel_gene_remapping(final_df, ref_anno)
         else:
             return final_df
-
+    
     def annotate_one_group(self,
                            df_group: pd.DataFrame,
                            ref_anno: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -147,6 +249,15 @@ class IsoformAnnotator:
                 ref_dict = self._build_ref_dict(ref_df)
                 query_df = self._map_query_to_ref(query_df, ref_dict)
                 # Combine results
+                # Handle case where either ref_df or query_df is empty
+                if ref_df.empty and query_df.empty:
+                    return pd.DataFrame()
+                elif ref_df.empty:
+                    return query_df.drop_duplicates()
+                elif query_df.empty:
+                    # Update reference data with TSS/TES flags
+                    self._update_ref_with_flags(ref_df)
+                    return ref_df.drop_duplicates()
                 result_df = pd.concat([ref_df, query_df], ignore_index=True)
                 return result_df.drop_duplicates()
             elif ref_df.empty:   # All novel
@@ -158,6 +269,16 @@ class IsoformAnnotator:
         else:
             return self._fill_novel(df_group).drop_duplicates()
 
+    @staticmethod
+    def _annotate_one_group(
+        df_group: pd.DataFrame,
+        ref_anno: Optional[pd.DataFrame],
+        terminal_tolerance: int
+    ) -> pd.DataFrame:
+        """Static method version of annotate_one_group, used for multiprocessing"""
+        # Create temporary instance to reuse existing methods
+        temp_instance = IsoformAnnotator(terminal_tolerance=terminal_tolerance)
+        return temp_instance.annotate_one_group(df_group, ref_anno)
     # ------------------------------------------------------------------
     # 2.2 Annotation Helper Functions
     # ------------------------------------------------------------------
@@ -206,14 +327,13 @@ class IsoformAnnotator:
             """Calculate the sum of absolute differences between two ranges."""
             return sum(abs(a - b) for a, b in zip(ref_range, term_range))
 
-        def find_best_mapping(term_map_dict):
+        def find_best_mapping(term_map_dict, terminal_tolerance):
             """Find the key with minimum value in the mapping dictionary."""
             if not term_map_dict:
                 return None
             min_key = min(term_map_dict, key=term_map_dict.get)
             min_value = term_map_dict[min_key]
-            return min_key if min_value < (self.terminal_tolerance * 3) else None  # Using 3x terminal_tolerance instead of hardcoded 150
-
+            return min_key if min_value < (terminal_tolerance * 3) else None  # Using 3x terminal_tolerance instead of hardcoded 150
         # Create a copy to avoid modifying original dataframe
         result_df = df.copy()
         # Process each unique transcript ID
@@ -238,7 +358,7 @@ class IsoformAnnotator:
                 distance = calculate_range_distance(ref_range, term_range)
                 term_map_dict[untr] = distance
             # Find best mapping if minimum distance is less than threshold
-            best_match = find_best_mapping(term_map_dict)
+            best_match = find_best_mapping(term_map_dict, self.terminal_tolerance)
             if best_match is not None:
                 # Update map_uniqueTr column
                 result_df.loc[mask, 'map_uniqueTr'] = best_match
@@ -248,9 +368,7 @@ class IsoformAnnotator:
                 result_df.loc[mask, 'TrEnd_ref'] = best_end
             else:
                 # Set to None if no suitable match found
-                result_df.loc[mask, 'map_uniqueTr'] = None
-
-        # Process merging of TrID for duplicate map_uniqueTr values
+                result_df.loc[mask, 'map_uniqueTr'] = None        # Process merging of TrID for duplicate map_uniqueTr values
         def merge_duplicate_transcripts(df):
             """Merge rows with the same map_uniqueTr by combining TrID values."""
             df_result = df.copy()
@@ -322,23 +440,35 @@ class IsoformAnnotator:
             result_row = working_df.drop_duplicates()
             
         else:
-            unique_trids = uni_tr_mappings['TrID'].unique()
+            working_df = uni_tr_mappings.copy()
+
+            unique_trids = working_df['TrID'].unique()
             combined_trid = '_'.join(unique_trids)
-            uni_tr_mappings['TrID'] = f'{combined_trid}_AlterTssTes'
+            working_df['TrID'] = combined_trid
+
+            working_df['TrStart_ref'] = working_df.loc[np.abs(working_df['TrStart_ref'] - working_df['TrStart'].iloc[0]).idxmin(), 'TrStart_ref']
+            working_df['TrEnd_ref'] = working_df.loc[np.abs(working_df['TrEnd_ref'] - working_df['TrEnd'].iloc[0]).idxmin(), 'TrEnd_ref']
+            self._update_ref_with_flags(working_df)
             
-            trstart_ref_value = uni_tr_mappings['TrStart'].iloc[0]
-            trend_ref_value = uni_tr_mappings['TrEnd'].iloc[0]
-            uni_tr_mappings['TrStart_ref'] = trstart_ref_value
-            uni_tr_mappings['TrEnd_ref'] = trend_ref_value
+            trstart_ref_value = working_df['TrStart'].iloc[0]
+            trend_ref_value = working_df['TrEnd'].iloc[0]
+            working_df['TrStart_ref'] = trstart_ref_value
+            working_df['TrEnd_ref'] = trend_ref_value
             
-            result_row = uni_tr_mappings.drop_duplicates()
+            result_row = working_df.drop_duplicates()
         
         return result_row
 
+    # def _map_transcript_1to1(self, df):
+    #     return (
+    #     df.groupby('uniqueTr', group_keys=False, as_index=False)
+    #              .apply(self._transcript_1to1_processor, include_groups=True)
+    #              .reset_index(drop=True)
+    # ).drop(columns = ['match_status'])
     def _map_transcript_1to1(self, df):
         return (
-        df.groupby('uniqueTr', group_keys=False, as_index=False)
-                 .apply(self._transcript_1to1_processor, include_groups=True)
+        df.groupby(df['uniqueTr'].values, group_keys=False, as_index=False)
+                 .apply(self._transcript_1to1_processor)
                  .reset_index(drop=True)
     ).drop(columns = ['match_status'])
 
@@ -603,6 +733,44 @@ class IsoformAnnotator:
                 features = reverse_coords_and_order(features)
             return features
 
+        def calculate_donor_acceptor_sites(exons, strand):
+            """
+            Calculate donor and acceptor sites from exons
+            
+            Args:
+                exons: List of tuples representing exon coordinates [(start, end), ...]
+                strand: Strand orientation ('+' or '-')
+                
+            Returns:
+                Tuple of (donor_sites, acceptor_sites)
+            """
+            donor_sites = []
+            acceptor_sites = []
+            
+            # Iterate through adjacent exon pairs to calculate intron donor and acceptor sites
+            for i in range(len(exons) - 1):
+                exon1 = exons[i]
+                exon2 = exons[i+1]
+                intron_start = exon1[1] + 1  # Intron starts after first exon ends
+                intron_end = exon2[0] - 1    # Intron ends before second exon starts
+                
+                if strand == '+':
+                    # Positive strand: donor_site is the first two bases at the 5' end of intron
+                    # acceptor_site is the last two bases at the 3' end of intron
+                    donor_site = (intron_start, intron_start + 1)
+                    acceptor_site = (intron_end - 1, intron_end)
+                else:
+                    # Negative strand: donor_site is the last two bases at the 3' end of intron
+                    # acceptor_site is the first two bases at the 5' end of intron
+                    # Note: For negative strand, the donor and acceptor sites are reversed
+                    donor_site = (intron_end - 1, intron_end)      # Last two bases of intron
+                    acceptor_site = (intron_start, intron_start + 1)  # First two bases of intron
+                
+                donor_sites.append(donor_site)
+                acceptor_sites.append(acceptor_site)
+            
+            return donor_sites, acceptor_sites
+        
         def sort_gtf_by_hierarchy(gtf_file, output_file):
             # Create database
             db = gffutils.create_db(gtf_file, ':memory:', 
@@ -623,7 +791,7 @@ class IsoformAnnotator:
                     genes[gene_id]['transcripts'][transcript.id].append(transcript)
             # Collect sub-features for each transcript
             transcripts_features = defaultdict(list)
-            for feature in db.features_of_type(['exon', 'CDS', 'UTR', 'start_codon', 'stop_codon']):
+            for feature in db.features_of_type(['exon', 'CDS', 'UTR5', 'UTR3', 'UTR', 'start_codon', 'stop_codon', 'donor_site', 'acceptor_site']):
                 transcript_id = feature.attributes.get('transcript_id', [None])[0]
                 if transcript_id:
                     transcripts_features[transcript_id].append(feature)
@@ -632,9 +800,13 @@ class IsoformAnnotator:
                 'transcript': 0,
                 'exon': 1,
                 'CDS': 2,
+                'UTR5': 3,
+                'UTR3': 3,
                 'UTR': 3,
                 'start_codon': 4,
-                'stop_codon': 5
+                'stop_codon': 5,
+                'donor_site': 6,
+                'acceptor_site': 6
             }
             with open(output_file, 'w') as f:
                 # Sort by gene start position
@@ -746,6 +918,10 @@ class IsoformAnnotator:
                     has_cds = (r['Predict_NMD'] == 'Normal' and 
                               pd.notna(r['TIS_related_location']) and 
                               pd.notna(r['TTS_related_location']))
+                    
+                    # Calculate donor and acceptor sites
+                    donor_sites, acceptor_sites = calculate_donor_acceptor_sites(tx_exons[trid], strand)
+                    
                     fo.write(f"{chrom}\tAIDRS\ttranscript\t{tr_s}\t{tr_e}\t.\t{strand}\t.\t"
                              f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\";\n")
                     if has_cds:
@@ -775,29 +951,68 @@ class IsoformAnnotator:
                             for utr_s, utr_e in ribosome_data['utr3']:
                                 fo.write(f"{chrom}\tAIDRS\tUTR\t{utr_s}\t{utr_e}\t.\t{strand}\t.\t"
                                          f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\";\n")
+                            for utr_s, utr_e in ribosome_data['utr5']:
+                                fo.write(f"{chrom}\tAIDRS\tUTR5\t{utr_s}\t{utr_e}\t.\t{strand}\t.\t"
+                                         f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\";\n")
+                            for utr_s, utr_e in ribosome_data['utr3']:
+                                fo.write(f"{chrom}\tAIDRS\tUTR3\t{utr_s}\t{utr_e}\t.\t{strand}\t.\t"
+                                         f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\";\n")
+                            
+                            # Output donor sites
+                            for i, (ds_start, ds_end) in enumerate(donor_sites):
+                                fo.write(f"{chrom}\tAIDRS\tdonor_site\t{ds_start}\t{ds_end}\t.\t{strand}\t.\t"
+                                         f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\"; junction_number \"{i+1}\";\n")
+                            
+                            # Output acceptor sites
+                            for i, (as_start, as_end) in enumerate(acceptor_sites):
+                                fo.write(f"{chrom}\tAIDRS\tacceptor_site\t{as_start}\t{as_end}\t.\t{strand}\t.\t"
+                                         f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\"; junction_number \"{i+1}\";\n")
                         except Exception as e:
                             print(f"Warning: Error processing transcript {trid}: {e}")
                             # Fallback to output exon only on error
                             for i, (es, ee) in enumerate(tx_exons[trid], 1):
                                 fo.write(f"{chrom}\tAIDRS\texon\t{es}\t{ee}\t.\t{strand}\t.\t"
                                          f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\"; exon_number \"{i}\";\n")
+                            
+                            # Output donor sites for fallback case
+                            for i, (ds_start, ds_end) in enumerate(donor_sites):
+                                fo.write(f"{chrom}\tAIDRS\tdonor_site\t{ds_start}\t{ds_end}\t.\t{strand}\t.\t"
+                                         f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\"; junction_number \"{i+1}\";\n")
+                            
+                            # Output acceptor sites for fallback case
+                            for i, (as_start, as_end) in enumerate(acceptor_sites):
+                                fo.write(f"{chrom}\tAIDRS\tacceptor_site\t{as_start}\t{as_end}\t.\t{strand}\t.\t"
+                                         f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\"; junction_number \"{i+1}\";\n")
                     else:
                         # No CDS, output exon only
                         for i, (es, ee) in enumerate(tx_exons[trid], 1):
                             fo.write(f"{chrom}\tAIDRS\texon\t{es}\t{ee}\t.\t{strand}\t.\t"
                                      f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\"; exon_number \"{i}\";\n")
+                        
+                        # Output donor sites
+                        for i, (ds_start, ds_end) in enumerate(donor_sites):
+                            fo.write(f"{chrom}\tAIDRS\tdonor_site\t{ds_start}\t{ds_end}\t.\t{strand}\t.\t"
+                                     f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\"; junction_number \"{i+1}\";\n")
+                        
+                        # Output acceptor sites
+                        for i, (as_start, as_end) in enumerate(acceptor_sites):
+                            fo.write(f"{chrom}\tAIDRS\tacceptor_site\t{as_start}\t{as_end}\t.\t{strand}\t.\t"
+                                     f"gene_id \"{gid}\"; transcript_id \"{trid}\"; gene_name \"{r['GeneName']}\"; junction_number \"{i+1}\";\n")
         
         # 7. Sort the temporary GTF file by hierarchy and write to final output
         sort_gtf_by_hierarchy(temp_output_path, final_output_path)
         print("=== Transcript GTF file written to: ", final_output_path)
 
-    def to_fasta(self, gtf_file: str, genome_fasta: str, output_dir: str) -> None:
+    def to_fasta(self, gtf_file: str, genome_fasta: str, output_dir: str, df_result_after_quant: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
         """
         Generate transcript FASTA file from GTF and genome FASTA
         Args:
             gtf_file: Path to the GTF file
             genome_fasta: Path to the reference genome FASTA file
             output_fasta: Path to the output transcript FASTA file
+            df_result_after_quant: Optional DataFrame to add sequence length information to
+        Returns:
+            Updated df_result_after_quant DataFrame with seq_len column if provided, otherwise None
         """
         output_fasta = os.path.join(output_dir, 'aidrs.transcript_model.fasta')
         # Load genome sequence
@@ -846,12 +1061,22 @@ class IsoformAnnotator:
                 seq = info['sequence']
                 gene_name = info['gene_name']
                 # Write header with transcript ID and gene name
-                header = f">{tr_id}|{gene_name}|length={len(seq)}"
+                header = f">{tr_id}"
                 f.write(header + '\n')
                 # Write sequence in 80-character lines
                 for i in range(0, len(seq), 80):
                     f.write(seq[i:i+80] + '\n')
         print(f"Transcript FASTA file written to: {output_fasta}")
+        
+        # If df_result_after_quant is provided, add seq_len column
+        if df_result_after_quant is not None:
+            # Add seq_len column to df_result_after_quant
+            df_result_after_quant['seq_len'] = df_result_after_quant['TrID'].map(
+                {tr_id: len(info['sequence']) for tr_id, info in transcript_sequences.items()}
+            )
+            return df_result_after_quant
+        
+        return None
 
     def _reverse_complement(self, seq: str) -> str:
         """
@@ -898,106 +1123,107 @@ class IsoformAnnotator:
     #         "gene_tpm": df.groupby(['GeneID', 'GeneName', 'sample'],
     #                               observed=True)['weighted_tpm'].sum().unstack(fill_value=0)
     #     }
-    def quantify(self, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        # Calculate transcript length from exon sites (sum of exon lengths)
-        df['length'] = df['sites'].apply(
-            lambda s: sum(s[i+1] - s[i] for i in range(0, len(s), 2))
-        )
-        
-        transcript_tpm_list = []
-        gene_tpm_list = []
-        transcript_cpm_list = []
-        gene_cpm_list = []
-        
-        # Process each sample independently
-        for sample, group in df.groupby('sample'):
-            group = group.copy()
-            
-            # --- Transcript-level metrics ---
-            # 1. Calculate transcript CPM (normalize by total reads per sample)
-            total_reads = group['quantification'].sum()  # Total mapped reads for sample
-            group['CPM'] = (group['quantification'] / total_reads * 1e6).round(2)
-            
-            # 2. Calculate transcript TPM (normalize by total RPK per sample)
-            group['rpk'] = group['quantification'] / (group['length'] / 1000)
-            total_rpk = group['rpk'].sum()
-            group['TPM'] = (group['rpk'] / total_rpk * 1e6).round(2)
-            transcript_tpm_list.append(group)
-            transcript_cpm_list.append(group[['TrID', 'GeneID', 'GeneName', 'CPM', 'sample']])
-            
-            # --- Gene-level metrics (recalculate from raw counts) ---
-            # Aggregate transcript counts to gene level
-            gene_agg = group.groupby(['GeneID', 'GeneName'], observed=True).agg(
-                gene_count=('quantification', 'sum'),  # Sum of transcript counts
-                gene_length=('length', lambda x: np.sum(x * group.loc[x.index, 'quantification']) / x.sum())  # Expression-weighted length
-            ).reset_index()
-            
-            # Calculate gene CPM (using total sample reads)
-            gene_agg['gene_CPM'] = (gene_agg['gene_count'] / total_reads * 1e6).round(2)
-            
-            # Calculate gene TPM (using gene-level RPK)
-            gene_agg['gene_rpk'] = gene_agg['gene_count'] / (gene_agg['gene_length'] / 1000)
-            total_gene_rpk = gene_agg['gene_rpk'].sum()  # Should equal total_rpk
-            gene_agg['gene_TPM'] = (gene_agg['gene_rpk'] / total_gene_rpk * 1e6).round(2)
-            gene_agg['sample'] = sample
-            gene_tpm_list.append(gene_agg)
-            gene_cpm_list.append(gene_agg[['GeneID', 'GeneName', 'gene_CPM', 'sample']])
-        
-        # Merge results
-        df_transcript = pd.concat(transcript_tpm_list, ignore_index=True)
-        df_gene = pd.concat(gene_tpm_list, ignore_index=True)
-        df_transcript_cpm = pd.concat(transcript_cpm_list, ignore_index=True)
-        df_gene_cpm = pd.concat(gene_cpm_list, ignore_index=True)
-        
-        return {
-            # Transcript counts
-            "transcript_counts": df.pivot_table(
-                index=['TrID', 'GeneID', 'GeneName'],
-                columns='sample',
-                values='quantification',
-                fill_value=0
-            ),
-            
-            # Transcript TPM
-            "transcript_tpm": df_transcript.pivot_table(
-                index=['TrID', 'GeneID', 'GeneName'],
-                columns='sample',
-                values='TPM',
-                fill_value=0
-            ),
-            
-            # Transcript CPM 
-            "transcript_cpm": df_transcript_cpm.pivot_table(
-                index=['TrID', 'GeneID', 'GeneName'],
-                columns='sample',
-                values='CPM',
-                fill_value=0
-            ),
-            
-            # Gene counts
-            "gene_counts": df_gene.pivot_table(
-                index=['GeneID', 'GeneName'],
-                columns='sample',
-                values='gene_count',
-                fill_value=0
-            ),
-            
-            # Gene TPM
-            "gene_tpm": df_gene.pivot_table(
-                index=['GeneID', 'GeneName'],
-                columns='sample',
-                values='gene_TPM',
-                fill_value=0
-            ),
-            
-            # Gene CPM 
-            "gene_cpm": df_gene_cpm.pivot_table(
-                index=['GeneID', 'GeneName'],
-                columns='sample',
-                values='gene_CPM',
-                fill_value=0
-            )
-        }
+    # quantify method has been moved to the IsoformQuantifier class
+    # def quantify(self, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    #     # Calculate transcript length from exon sites (sum of exon lengths)
+    #     df['length'] = df['sites'].apply(
+    #         lambda s: sum(s[i+1] - s[i] for i in range(0, len(s), 2))
+    #     )
+    #     
+    #     transcript_tpm_list = []
+    #     gene_tpm_list = []
+    #     transcript_cpm_list = []
+    #     gene_cpm_list = []
+    #     
+    #     # Process each sample independently
+    #     for sample, group in df.groupby('sample'):
+    #         group = group.copy()
+    #         
+    #         # --- Transcript-level metrics ---
+    #         # 1. Calculate transcript CPM (normalize by total reads per sample)
+    #         total_reads = group['quantification'].sum()  # Total mapped reads for sample
+    #         group['CPM'] = (group['quantification'] / total_reads * 1e6).round(2)
+    #         
+    #         # 2. Calculate transcript TPM (normalize by total RPK per sample)
+    #         group['rpk'] = group['quantification'] / (group['length'] / 1000)
+    #         total_rpk = group['rpk'].sum()
+    #         group['TPM'] = (group['rpk'] / total_rpk * 1e6).round(2)
+    #         transcript_tpm_list.append(group)
+    #         transcript_cpm_list.append(group[['TrID', 'GeneID', 'GeneName', 'CPM', 'sample']])
+    #         
+    #         # --- Gene-level metrics (recalculate from raw counts) ---
+    #         # Aggregate transcript counts to gene level
+    #         gene_agg = group.groupby(['GeneID', 'GeneName'], observed=True).agg(
+    #             gene_count=('quantification', 'sum'),  # Sum of transcript counts
+    #             gene_length=('length', lambda x: np.sum(x * group.loc[x.index, 'quantification']) / x.sum())  # Expression-weighted length
+    #         ).reset_index()
+    #         
+    #         # Calculate gene CPM (using total sample reads)
+    #         gene_agg['gene_CPM'] = (gene_agg['gene_count'] / total_reads * 1e6).round(2)
+    #         
+    #         # Calculate gene TPM (using gene-level RPK)
+    #         gene_agg['gene_rpk'] = gene_agg['gene_count'] / (gene_agg['gene_length'] / 1000)
+    #         total_gene_rpk = gene_agg['gene_rpk'].sum()  # Should equal total_rpk
+    #         gene_agg['gene_TPM'] = (gene_agg['gene_rpk'] / total_gene_rpk * 1e6).round(2)
+    #         gene_agg['sample'] = sample
+    #         gene_tpm_list.append(gene_agg)
+    #         gene_cpm_list.append(gene_agg[['GeneID', 'GeneName', 'gene_CPM', 'sample']])
+    #     
+    #     # Merge results
+    #     df_transcript = pd.concat(transcript_tpm_list, ignore_index=True)
+    #     df_gene = pd.concat(gene_tpm_list, ignore_index=True)
+    #     df_transcript_cpm = pd.concat(transcript_cpm_list, ignore_index=True)
+    #     df_gene_cpm = pd.concat(gene_cpm_list, ignore_index=True)
+    #     
+    #     return {
+    #         # Transcript counts
+    #         "transcript_counts": df.pivot_table(
+    #             index=['TrID', 'GeneID', 'GeneName'],
+    #             columns='sample',
+    #             values='quantification',
+    #             fill_value=0
+    #         ),
+    #         
+    #         # Transcript TPM
+    #         "transcript_tpm": df_transcript.pivot_table(
+    #             index=['TrID', 'GeneID', 'GeneName'],
+    #             columns='sample',
+    #             values='TPM',
+    #             fill_value=0
+    #         ),
+    #         
+    #         # Transcript CPM 
+    #         "transcript_cpm": df_transcript_cpm.pivot_table(
+    #             index=['TrID', 'GeneID', 'GeneName'],
+    #             columns='sample',
+    #             values='CPM',
+    #             fill_value=0
+    #         ),
+    #         
+    #         # Gene counts
+    #         "gene_counts": df_gene.pivot_table(
+    #             index=['GeneID', 'GeneName'],
+    #             columns='sample',
+    #             values='gene_count',
+    #             fill_value=0
+    #         ),
+    #         
+    #         # Gene TPM
+    #         "gene_tpm": df_gene.pivot_table(
+    #             index=['GeneID', 'GeneName'],
+    #             columns='sample',
+    #             values='gene_TPM',
+    #             fill_value=0
+    #         ),
+    #         
+    #         # Gene CPM 
+    #         "gene_cpm": df_gene_cpm.pivot_table(
+    #             index=['GeneID', 'GeneName'],
+    #             columns='sample',
+    #             values='gene_CPM',
+    #             fill_value=0
+    #         )
+    #     }
 
     def polyA_len_profile(self, df: pd.DataFrame, out_dir) -> Dict[str, pd.DataFrame]:
         pattern = os.path.join(out_dir, 'temp', '*_flnc_correct.ssc')
@@ -1041,5 +1267,3 @@ class IsoformAnnotator:
                 "gene_polyA_len": df.groupby(['GeneID', 'GeneName', 'sample'],
                                          observed=True)['polyA_len'].mean().unstack(fill_value=0)
             }
-
-

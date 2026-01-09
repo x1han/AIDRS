@@ -1,6 +1,6 @@
 # AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq
 
-**AIDRS** (**AI-Aided Isoform Discovery for direct RNA-Seq) is an advanced sequencing data–driven framework for full-length RNA isoform reconstruction and quantification from Oxford Nanopore Technology Direct RNA sequencing. Inspired by [ISAtools](https://github.com/shizhuoxing/ISAtools), AIDRS extends the functionality with additional capabilities for protein coding potential prediction and translation site identification.
+**AIDRS** (AI-Aided Isoform Discovery for direct RNA-Seq) is an advanced sequencing data–driven framework for full-length RNA isoform reconstruction and quantification from Oxford Nanopore Technology Direct RNA sequencing. Inspired by [ISAtools](https://github.com/shizhuoxing/ISAtools), AIDRS extends the functionality with additional capabilities for protein coding potential prediction and translation site identification.
 
 Designed with annotation flexibility and biological fidelity in mind, AIDRS supports isoform identification with high precision and recall, and accurately resolves splice junctions and transcript boundaries directly from read evidence.
 
@@ -61,13 +61,7 @@ Upon successful execution, output files will appear in the default `aidrs_output
 
 - `aidrs.transcript_model.gtf`: Final filtered transcript models (including known and novel isoforms).
 - `aidrs.transcript.assessment.tsv`: Transcript model assessment statistics.
-- `aidrs_gene_counts.tsv`: Gene-level raw read counts.
-- `aidrs_gene_tpm.tsv`: Gene-level TPM expression values.
-- `aidrs_transcript_counts.tsv`: Transcript-level read counts.
-- `aidrs_transcript_tpm.tsv`: Transcript-level TPMs.
 
 ### Optional Output (with `--keep_temp`)
 
-- `*_flnc.ssc`: Read-level SSC file with alignment details.
-- `*_ssc.count`: Unique SSCs with aggregated read counts.
-- `anno.ssc`: Reference annotation converted into SSC format (if `-g` is provided).
+- `*flnc.ssc`: Read-level SSC file with alignment details.

@@ -7,9 +7,9 @@ class ConsensusFilter:
     consensus
     """
 
-    def __init__(self, consensus_bp=10, consensus_multiple=0.1, num_processes=10):
+    def __init__(self, consensus_bp=10, consensus_ratio=0.1, num_processes=10):
         self.consensus_bp = consensus_bp
-        self.consensus_multiple = consensus_multiple
+        self.consensus_ratio = consensus_ratio
         self.num_processes = num_processes
 
     def _consensus_sites_for_chr(self, df):
@@ -63,7 +63,7 @@ class ConsensusFilter:
             for _, group in grouped_df.groupby('site_group'):
                 ref_freq = group.iloc[0]['total_freq']
                 for index, row in group.iloc[1:].iterrows():
-                    if row['total_freq'] / ref_freq < self.consensus_multiple:
+                    if row['total_freq'] / ref_freq < self.consensus_ratio:
                         error_sites.append(row['site'])
 
             for index, row in df_group.iterrows():

@@ -202,6 +202,10 @@ def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fract
     for df_group in df_groups:
         # Copy data to avoid direct modification
         df_group = df_group.copy()
+
+        if puffin_prediction_threshold == 0: 
+            df_group['Puffin_TSS_15bp'] = 1
+            df_group['Puffin_TSS_50bp'] = 1
         
         # Get strand information for the current group
         strand = df_group['Strand'].iloc[0]
@@ -210,11 +214,11 @@ def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fract
         # If hard_filter is True, apply the specific filtering logic
         if hard_filter:
             # Avoid SettingWithCopyWarning
-            test = df_group.copy()
-            test['Puffin_TSS_15bp'] = pd.to_numeric(test['Puffin_TSS_15bp'], errors='coerce')  # 'no' -> NaN
+            df_group_sub = df_group.copy()
+            df_group_sub['Puffin_TSS_15bp'] = pd.to_numeric(df_group_sub['Puffin_TSS_15bp'], errors='coerce')  # 'no' -> NaN
             
-            # Filter: non-null (not originally 'no') and > 0.02,同时 polyA_frac > 0.95
-            mask_to_keep = test['Puffin_TSS_15bp'].gt(0.02) & test['polyA_frac'].gt(0.95)
+            # Filter: non-null (not originally 'no') and > 0.02, and polyA_frac > 0.95
+            mask_to_keep = df_group_sub['Puffin_TSS_15bp'].gt(0.02) & df_group_sub['polyA_frac'].gt(0.95)
             df_group_filtered = df_group[mask_to_keep]
         else:
             def should_filter_row(row):
