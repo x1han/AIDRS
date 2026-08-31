@@ -93,13 +93,6 @@ class MappingToReference:
 
         return df.drop(columns=['key', 'ref'])
         
-    def ism_filter(self, df):
-        """
-        ISM filter
-        """
-        # This method is not currently used in the mapping to reference workflow
-        return df
-    
     def find_nearest_exon(self, ref_sites, query_sites):
         """
         Find nearest exons for site mapping.

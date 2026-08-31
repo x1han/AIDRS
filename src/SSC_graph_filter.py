@@ -27,12 +27,11 @@ class SSCGraphFilter:
                  little_exon_jump_ratio_ref=0.1,
                  Nonlittle_exon_jump_ratio=0.05,
                  Nonlittle_exon_jump_ratio_ref=0.1,
-                 
-                 # Parameters from gtf_rescue_filtering
+
                  fake_exon_group_freq_ratio=0.1,
                  fake_exon_group_freq_ratio_ref=0.2,
                  fake_exon_bp=50,
-                 
+
                  # Common parameters
                  num_processes=10):
         """
@@ -49,8 +48,7 @@ class SSCGraphFilter:
         self.little_exon_jump_ratio_ref = little_exon_jump_ratio_ref
         self.Nonlittle_exon_jump_ratio = Nonlittle_exon_jump_ratio
         self.Nonlittle_exon_jump_ratio_ref = Nonlittle_exon_jump_ratio_ref
-        
-        # Parameters from gtf_rescue_filtering
+
         self.fake_exon_group_freq_ratio = fake_exon_group_freq_ratio
         self.fake_exon_group_freq_ratio_ref = fake_exon_group_freq_ratio_ref
         self.fake_exon_bp = fake_exon_bp
