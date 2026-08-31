@@ -14,11 +14,11 @@ import h5py
 import time
 from translationai.utils import *
 
-if __name__ == '__main__':
+def convert_fa_to_h5(fa_in, h5_out):
     start_time = time.time()
 
-    fnIn=sys.argv[1]
-    fnOut=sys.argv[2]
+    fnIn=fa_in
+    fnOut=h5_out
 
     CHUNK_SIZE=1
     pad_len = CL_max // 2
@@ -85,3 +85,6 @@ if __name__ == '__main__':
 
     print("----File conversion done (%s to %s)! Time used: %d seconds.----" %
           (fnIn.split('/')[-1], fnOut.split('/')[-1], time.time() - start_time))
+
+if __name__ == '__main__':
+    convert_fa_to_h5(sys.argv[1], sys.argv[2])

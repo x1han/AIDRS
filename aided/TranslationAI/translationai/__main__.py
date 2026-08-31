@@ -13,6 +13,7 @@ from translationai.utils import *
 import argparse
 import logging
 from pkg_resources import resource_filename
+from translationai.fa_to_h5_converter import convert_fa_to_h5
 
 # print(f"Python executable: {sys.executable}")
 
@@ -50,9 +51,7 @@ def TIS_TTS_predictor(modelScale, modelsUsed,TIS_score_cutoff, TTS_score_cutoff,
     h5f_name = input_fa_fn[:-3] + '.h5'
     if not os.path.exists(h5f_name):
         # print("{:-^100}".format('Creating .h5 dataset from .fa file'))
-        prog_path = resource_filename(__name__, 'fa_to_h5_converter.py')
-        command = sys.executable + ' ' + prog_path + ' ' + input_fa_fn + ' ' + input_fa_fn[:-3] + '.h5'
-        os.system(command)
+        convert_fa_to_h5(input_fa_fn, input_fa_fn[:-3] + '.h5')
     else:
         1
         # print("{:-^100}".format('Reading in input .h5 file'))
