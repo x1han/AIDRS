@@ -14,7 +14,7 @@ from .aidrs_runtime.translationai_runner import TranslationAIRunner
 
 class TranslationAI_ORF:
     def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=8):
-        self.genome = genome
+        self.genome = Fasta(genome)
         self.tmp_path = tmp_path
         self.translationai_score_threshold = translationai_score_threshold
         self.num_processes = num_processes
@@ -97,7 +97,6 @@ class TranslationAI_ORF:
         Chrom = df_fasta['Chr'].unique()[0]
         Strand = df_fasta['Strand'].unique()[0]
 
-        genome = Fasta(genome)
         df_fasta['seq'] = df_fasta.apply(lambda row: TranslationAI_ORF.fetch_seq(row, genome), axis=1)
 
         fasta_out_dir = os.path.join(tmp_path, "TranslationAI_temp/")
