@@ -226,3 +226,5 @@ temp/
 
 # Qoder specific
 .qoder/
+
+.codegraph/
