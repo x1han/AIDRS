@@ -5,9 +5,12 @@ from Bio.Seq import Seq
 import pandas as pd
 from pyfaidx import Fasta
 import os
-import subprocess
 from functools import partial
-import multiprocessing as mp
+
+# F3b: import the in-process TranslationAIRunner. The runner loads the 5 .h5
+# keras models once and serves all sequences; orf_predict_by_translationai
+# no longer spawns one subprocess per (Chr, Strand).
+from .aidrs_runtime.translationai_runner import TranslationAIRunner
 
 class TranslationAI_ORF:
     def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=8):
@@ -15,6 +18,10 @@ class TranslationAI_ORF:
         self.tmp_path = tmp_path
         self.translationai_score_threshold = translationai_score_threshold
         self.num_processes = num_processes
+        # F3b: instantiate the in-process runner ONCE. Loading the 5 .h5
+        # models here (instead of once-per-(Chr, Strand) subprocess) is the
+        # whole point of F3b.
+        self._runner = TranslationAIRunner()
 
     @staticmethod
     def fetch_exon(row):
@@ -81,10 +88,10 @@ class TranslationAI_ORF:
         return str(seq)
 
     @staticmethod
-    def run_translationai(df, genome, tmp_path):
+    def run_translationai(df, genome, tmp_path, runner=None):
         if df.empty:
             return
-        
+
         df_fasta = df.copy()
 
         Chrom = df_fasta['Chr'].unique()[0]
@@ -112,7 +119,7 @@ class TranslationAI_ORF:
             for idx, key in keys.items():
                 output_entries = []
                 seq = df_fasta.iloc[idx]['seq']
-                
+
                 # Generate FASTA header
                 try:
                     seq_name = (
@@ -133,17 +140,29 @@ class TranslationAI_ORF:
                 # Batch write to file
                 if output_entries:
                     fh.writelines(output_entries)
-        cmd = ["translationai",
-        "-I", fasta_out_path, 
-        "-t", "0.5,0.5"]
-        subprocess.run(cmd, check=True)
+        # F3b: in-process prediction. The 5 .h5 models live in `runner`; we
+        # just hand it the per-(Chr, Strand) FASTA and let it produce the
+        # _predTIS_*/_predTTS_*/_predORFs_* files that aggr_translationai_result
+        # already knows how to read.
+        if runner is None:
+            raise RuntimeError(
+                "TranslationAI runner not initialised; F3b requires an "
+                "in-process TranslationAIRunner."
+            )
+        runner.predict_fasta(fasta_out_path, threshold_str="0.5,0.5")
 
     def orf_predict_by_translationai(self, df):
+        # F3b: replaced per-(Chr, Strand) subprocess fan-out with the in-process
+        # TranslationAIRunner. The 5 .h5 models are loaded once at __init__ and
+        # reused for every group; no subprocess is spawned.
         df_groups = [g for _, g in df.groupby(['Chr','Strand'], observed=True)]
-        with mp.Pool(self.num_processes) as pool:
-            pool.map(partial(TranslationAI_ORF.run_translationai, genome=self.genome, tmp_path=self.tmp_path),
-            df_groups
-        )
+        for df_group in df_groups:
+            TranslationAI_ORF.run_translationai(
+                df_group,
+                genome=self.genome,
+                tmp_path=self.tmp_path,
+                runner=self._runner,
+            )
     
     @staticmethod
     def check_nmd(df, translationai_score_threshold=0.9):
