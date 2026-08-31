@@ -170,7 +170,11 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
                     str_pos = 'NA'            
 
             polya_len = next((t[1] for t in read.tags if t[0] == 'pt'), None)
-            polya_len = int(polya_len) if polya_len is not None else 0
+            # Dorado pt:i sentinel semantics:
+            #   >0  = estimated poly(A/T) tail length
+            #   =0  = primer anchor found, length inestimable
+            #   =-1 = primer anchor NOT found (treat as missing -> 0)
+            polya_len = max(0, int(polya_len)) if polya_len is not None else 0
 
             out1_fh.write(f'{read.query_name}.m{id_count[read.query_name]}\t'
                          f'{read.reference_name}\t{strand}\t{s1}\t{e1}\t{str_pos}\t'
