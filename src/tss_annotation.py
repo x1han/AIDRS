@@ -1,12 +1,10 @@
 #!/usr/bin/env python
 
-import multiprocessing as mp
-from functools import partial
-import subprocess
 import os
-import sys
 import pandas as pd
 import numpy as np
+
+from .aidrs_runtime.puffin_runner import PuffinRunner
 
 class TSS_Puffin:
     def __init__(self, genome, num_processes=8, tmp_path='temp', puffin_prediction_threshold=0.02):
@@ -15,42 +13,7 @@ class TSS_Puffin:
         self.genome = genome
         self.puffin_prediction_threshold = puffin_prediction_threshold
 
-    
-    @staticmethod
-    def run_puffin(df, genome, tmp_path):
-        if df.empty:
-            return
 
-        Chrom = df['Chr'].unique()[0]
-        Strand = df['Strand'].unique()[0]
-
-        tss_col = 'TrStart' if Strand == '+' else 'TrEnd'
-
-        tss_sites_raw = df[tss_col].unique()
-
-        puffin_in_path = f'{tmp_path}/puffin_in'
-        puffin_out_path = f'{tmp_path}/puffin_out'
-        os.makedirs(puffin_in_path, exist_ok=True)
-        os.makedirs(puffin_out_path, exist_ok=True)
-
-        out_file = os.path.join(puffin_in_path, f'{Chrom}_{Strand}.tsv')
-
-        with open(out_file, 'w') as fout:
-            fout.write('chr\tstart\tend\tstrand\n')
-            for tss_site in tss_sites_raw:
-                Start = tss_site - 500
-                End   = tss_site + 500
-                fout.write(f'{Chrom}\t{Start}\t{End}\t{Strand}\n')
-
-        current_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        puffin_script = os.path.join(current_dir, 'aided', 'Puffin', 'puffin.py')
-        cmd = [sys.executable, puffin_script, 
-        "region", 
-        "--output", puffin_out_path, 
-        "--genome", genome,
-        out_file]
-        subprocess.run(cmd, check=True)
-    
     @staticmethod
     def correct_puffin(df, puffin_prediction_threshold=0.02):
 
@@ -88,11 +51,9 @@ class TSS_Puffin:
 
 
     def tss_anno_by_puffin(self, df):
-        df_groups = [g for _, g in df.groupby(['Chr','Strand'], observed=True)]
-        with mp.Pool(self.num_processes) as pool:
-            pool.map(partial(TSS_Puffin.run_puffin, genome=self.genome, tmp_path=self.tmp_path),
-            df_groups
-        )
+        puffin_out_path = os.path.join(self.tmp_path, 'puffin_out')
+        runner = PuffinRunner(genome_path=self.genome, num_threads=self.num_processes)
+        runner.predict_sites(df, puffin_out_path)
 
     def aggr_puffin_result(self, df, puffin_out_path):
 
@@ -155,7 +116,7 @@ class TSS_Puffin:
             _, Chr_, Start, End, Strand = base.split("_", 4)
             Strand = Strand.replace("minus", "-").replace("plus", "+")
 
-            pred = pd.read_csv(os.path.join(puffin_out_path, name), index_col=0).loc["Prediction"]
+            pred = pd.read_csv(os.path.join(puffin_out_path, name), index_col=0).loc["Prediciton FANTOM_CAGE"]
 
             idx_names = list(range(-174, -174 + len(pred)))
             row = [Chr_, int(Start), int(End), Strand] + pred.values.tolist()
