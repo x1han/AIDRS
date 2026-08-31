@@ -15,6 +15,8 @@ from collections import defaultdict
 from Bio.Seq import Seq
 import pysam
 
+logger = logging.getLogger(__name__)
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert BAM to SSC format")
     parser.add_argument("--reference", "-r", help="reference genome in FASTA format", type=str)
