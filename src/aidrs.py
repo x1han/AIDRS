@@ -204,11 +204,23 @@ def isoform_validating(df, args, ref_anno=None):
     polyanno = polyAnnotator(args)
     df = polyanno.anno_polya(df, flnc_paths)
 
-    logger.info("Stage 2.4: Performing TranslationAI ORF prediction and NMD assessment...")
-    transai = TranslationAI_ORF(genome=args.reference, tmp_path=f"{args.output}/temp", translationai_score_threshold=args.translationai_score_threshold, num_processes=args.threads)
-    transai.orf_predict_by_translationai(df)
-    df = transai.aggr_translationai_result(df, f'{args.output}/temp/TranslationAI_temp')
-    logger.info(f"Functional annotation completed. Annotated {len(df)} SSC records.")
+    if args.no_translationai:
+        logger.warning(
+            "--no_translationai is set: skipping Stage 2.4 TranslationAI ORF/NMD prediction. "
+            "Transcripts will carry Predict_NMD='no_orf' sentinels; downstream CDS/UTR annotation will be empty."
+        )
+        df['TIS_related_location'] = 'no'
+        df['TTS_related_location'] = 'no'
+        df['TIS_score'] = 'no'
+        df['TTS_score'] = 'no'
+        df['Predict_NMD'] = 'no_orf'
+        logger.info(f"Functional annotation skipped. Annotated {len(df)} SSC records.")
+    else:
+        logger.info("Stage 2.4: Performing TranslationAI ORF prediction and NMD assessment...")
+        transai = TranslationAI_ORF(genome=args.reference, tmp_path=f"{args.output}/temp", translationai_score_threshold=args.translationai_score_threshold, num_processes=args.threads)
+        transai.orf_predict_by_translationai(df)
+        df = transai.aggr_translationai_result(df, f'{args.output}/temp/TranslationAI_temp')
+        logger.info(f"Functional annotation completed. Annotated {len(df)} SSC records.")
 
     logger.info("Stage 2.5: Performing Truncation assessment...")
     truncationprocessor = TruncationProcessor(
@@ -367,7 +379,11 @@ def parse_args(cmd_args):
     parser.add_argument("--extrem_terminal", action="store_true", help="Use extreme terminal sites instead of representative sites. Default: False")
     parser.add_argument("--puffin_prediction_threshold", type=float, default=0.02, help="Puffin prediction threshold for TSS annotation and filtering. Default: 0.02")
     parser.add_argument("--polya_fraction_threshold", type=float, default=0.95, help="PolyA fraction threshold for transcript filtering. Default: 0.95")
-    parser.add_argument("--translationai_score_threshold", type=float, default=0.9, help="TranslationAI score threshold for ORF prediction. Default: 0.9")
+    parser.add_argument("--translationai_score_threshold", type=float, default=0.9, help="TranslationAI score threshold for ORF prediction. Default: 0.9 (ignored when --no_translationai is set)")
+    parser.add_argument("--no_translationai", action="store_true",
+        help="Skip Stage 2.4 TranslationAI ORF/NMD prediction. Output will have "
+             "TIS/TTS columns set to 'no' and Predict_NMD set to 'no_orf' for every "
+             "transcript. CDS/UTR annotations in the GTF output will be empty.")
     parser.add_argument("--hard_filter", action="store_true", help="Hard filtering based on Puffin_TSS_15bp and polyA_frac thresholds.")
     
     # Thresholds for splice site (SS) and transcription start/end site (TSS/TES) correction
