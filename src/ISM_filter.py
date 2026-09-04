@@ -23,13 +23,21 @@ class TruncationProcessor:
             key = (row['Chr'], row['Strand'], row['Group'])
             grouped_dict.setdefault(key, []).append(row)
 
+        def _ssc_token_overlap(a, b):
+            # SSC is dash-joined list of splice-site positions (e.g. "100-200-300").
+            # Python `in` on strings does raw substring matching, so "20" would
+            # falsely match "100-200-300". Compare at token granularity instead.
+            a_tokens = set(str(a).split('-'))
+            b_tokens = set(str(b).split('-'))
+            return bool(a_tokens & b_tokens)
+
         for index, row in df.iterrows():
             key = (row['Chr'], row['Strand'], row['Group'])
             sourceSSC_counts = 0
             trun_source_freq = 0
             truncation_source = []
             for other_row in grouped_dict[key]:
-                if row['SSC'] != other_row['SSC'] and row['SSC'] in other_row['SSC']:
+                if row['SSC'] != other_row['SSC'] and _ssc_token_overlap(row['SSC'], other_row['SSC']):
                     sourceSSC_counts += 1
                     trun_source_freq += other_row['frequency']
                     truncation_source.append(other_row['SSC'])

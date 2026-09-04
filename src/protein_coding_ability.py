@@ -344,7 +344,10 @@ class TranslationAI_ORF:
                 if exon_ranges is None:
                     # fetch_exon returned None due to NaN/inf coordinates (P1-9).
                     # Treat as 'no_orf' rather than crashing the worker.
-                    df.at[idx, 'predict_NMD'] = 'no_orf'
+                    # Note: writing via df.at[idx, ...] from inside df.apply is a
+                    # pandas anti-pattern AND `idx` is not in scope here — drop it.
+                    # The return below is what gets assigned to Predict_NMD by
+                    # the outer df.apply(determine_nmd_status, axis=1).
                     return 'no_orf'
 
                 # EJC-dependent NMD determination

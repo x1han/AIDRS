@@ -22,9 +22,13 @@ class TSS_Puffin:
             tss_col = 'TrStart' if strand == '+' else 'TrEnd'
             puffin_15bp = row['Puffin_TSS_15bp']
             
-            if (isinstance(puffin_15bp, tuple) and 
-                len(puffin_15bp) >= 1 and 
-                puffin_15bp[0] != 'no' and 
+            # pick_highest_peak_with_value returns the special-sentinel tuple
+            # ('no', 'no') when no peak is found. puffin_15bp[0] is a
+            # signed_offset (int, e.g. -2) — never the string 'no' — so testing
+            # puffin_15bp[0] != 'no' was dead. Test the tuple as a whole.
+            if (isinstance(puffin_15bp, tuple) and
+                len(puffin_15bp) == 2 and
+                puffin_15bp != ('no', 'no') and
                 puffin_15bp[1] > puffin_prediction_threshold ):
                 row = row.copy()
                 # row[tss_col] = row[tss_col] - puffin_15bp[0] + 1
