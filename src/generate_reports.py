@@ -145,7 +145,22 @@ class IsoformAnnotator:
             table.to_csv(os.path.join(output_dir, f'aidrs_{name}.tsv'),
                          sep='\t')
         # ---- 6. Original assessment table ----
-        df_result_after_quant[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'frequency', 'Puffin_TSS_15bp', 'Puffin_TSS_50bp', 'polyA_frac', 'TIS_related_location', 'TTS_related_location', 'TIS_score', 'TTS_score', 'Predict_NMD', 'truncation', 'TrID', 'GeneID', 'GeneName', 'seq_len']].drop_duplicates().to_csv(os.path.join(output_dir,
+        # P1-6: propagate Stage 2.7 rt_switching_flag/score columns to the
+        # final assessment TSV. Without this they are silently dropped at
+        # report-generation time even though Stage 2.7 logs the count.
+        # Columns are only added when present, so legacy runs without
+        # --rt-switching-detect are byte-identical.
+        _ASSESS_COLS = [
+            'Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'frequency',
+            'Puffin_TSS_15bp', 'Puffin_TSS_50bp', 'polyA_frac',
+            'TIS_related_location', 'TTS_related_location',
+            'TIS_score', 'TTS_score', 'Predict_NMD', 'truncation',
+            'TrID', 'GeneID', 'GeneName', 'seq_len',
+        ]
+        for _c in ('rt_switching_score', 'rt_switching_flag'):
+            if _c in df_result_after_quant.columns and _c not in _ASSESS_COLS:
+                _ASSESS_COLS.append(_c)
+        df_result_after_quant[_ASSESS_COLS].drop_duplicates().to_csv(os.path.join(output_dir,
                       'aidrs.transcript.assessment.tsv'), sep='\t', index=False)
 
 
