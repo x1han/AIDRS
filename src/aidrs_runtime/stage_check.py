@@ -64,6 +64,13 @@ def stage_boundary_check(
             under a "metadata" key. Omitted entirely when None or empty, so
             records from callers that pass nothing are unchanged.
 
+            Contract: metadata is observability-only. It MUST NOT participate in
+            any stage filtering, FSM rescue, drop decision, or branch selection
+            downstream of this call. Use it for audit/provenance keys such as
+            trace_id, reference_version, sample_id. Adding fields that influence
+            control flow would turn this generic observability primitive into a
+            hidden decision channel and is explicitly disallowed.
+
     Returns:
         df_after unchanged -- function is logging-only, never modifies data.
     """
