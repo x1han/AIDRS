@@ -203,7 +203,17 @@ class TranslationAI_ORF:
         # to the same worker are processed sequentially WITHIN that worker
         # (preserves BLAS determinism per-strand); across workers the order
         # is free (as_completed).
-        df_groups = [g for _, g in df.groupby(['Chr','Strand'], observed=True)]
+        # LPT scheduling: longest (chr,strand) groups first to minimise straggler wait.
+        # Secondary key str(name) makes order independent of pandas groupby internal order.
+        # We iterate as (name, group) tuples so the key is always accessible — pandas
+        # groupby objects in 2.x do not expose `.name` on the DataFrame slice.
+        df_groups = sorted(
+            [(name, g) for name, g in df.groupby(['Chr','Strand'], observed=True)],
+            key=lambda ng: (-len(ng[1]), str(ng[0])),
+        )
+        # Unpack for downstream code that expects list[DataFrame] but uses
+        # df_group['Chr'].unique()[0] / df_group['Strand'].unique()[0] — still works on the DataFrame half.
+        df_groups = [g for _, g in df_groups]
         if not df_groups:
             return
         num_workers = max(1, min(self.num_processes, len(df_groups)))
@@ -475,8 +485,14 @@ class TranslationAI_ORF:
         # Create DataFrame and return
         if results:
             meriged_translationai_res = pd.DataFrame(results)
-        
-            df_groups = [g for _, g in df.groupby(['Chr','Strand'], observed=True)]
+
+            # LPT scheduling: longest (chr,strand) groups first to minimise straggler wait.
+            # Secondary key str(name) makes order independent of pandas groupby internal order.
+            df_groups = sorted(
+                [(name, g) for name, g in df.groupby(['Chr','Strand'], observed=True)],
+                key=lambda ng: (-len(ng[1]), str(ng[0])),
+            )
+            df_groups = [g for _, g in df_groups]
 
             merged_df_list = []
             for df_group in df_groups:
@@ -518,7 +534,13 @@ class TranslationAI_ORF:
                 df = pd.concat(merged_df_list, ignore_index=True)
         else:
             meriged_translationai_res = pd.DataFrame()
-            df_groups = [g for _, g in df.groupby(['Chr','Strand'], observed=True)]
+            # LPT scheduling: longest (chr,strand) groups first to minimise straggler wait.
+            # Secondary key str(name) makes order independent of pandas groupby internal order.
+            df_groups = sorted(
+                [(name, g) for name, g in df.groupby(['Chr','Strand'], observed=True)],
+                key=lambda ng: (-len(ng[1]), str(ng[0])),
+            )
+            df_groups = [g for _, g in df_groups]
 
             merged_df_list = []
             for df_group in df_groups:
