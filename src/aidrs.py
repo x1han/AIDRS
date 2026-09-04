@@ -40,6 +40,7 @@ from .protein_coding_ability import *
 from .gene_grouping import compute_is_intergenic_or_antisense
 from .single_exon import apply_5_pillar_funnel
 from .aidrs_runtime.stage_check import stage_boundary_check
+from .rt_switching_filter import detect_rt_switching
 
 
 def setup_logger(output_dir):
@@ -372,6 +373,22 @@ def isoform_validating(df, args, ref_anno=None):
     df = stage_boundary_check("2.6", _df26_before, df, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
     logger.info(f"TSS correction and filtering completed. Retained {len(df)} records.")
 
+    # Stage 2.7: RT-Switching artifact detection (opt-in; byte-identical
+    # baseline when disabled). Adds 2 new columns (rt_switching_score,
+    # rt_switching_flag) without modifying any pre-existing column.
+    if getattr(args, "rt_switching_detect", False):
+        _df27_before = df
+        df = detect_rt_switching(
+            df,
+            genome_fasta=genome_fasta,
+            microhomology_min_bp=getattr(args, "rt_switching_min_bp", 4),
+        )
+        df = stage_boundary_check("2.7", _df27_before, df, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
+        logger.info(
+            "RT-switching detection complete. rt_switching_flag=True count: %d",
+            int(df["rt_switching_flag"].sum()),
+        )
+
     return df
     
 
@@ -520,6 +537,16 @@ def parse_args(cmd_args):
              "TIS/TTS columns set to 'no' and Predict_NMD set to 'no_orf' for every "
              "transcript. CDS/UTR annotations in the GTF output will be empty.")
     parser.add_argument("--hard_filter", action="store_true", help="Hard filtering based on Puffin_TSS_15bp and polyA_frac thresholds.")
+    parser.add_argument("--rt-switching-detect", action="store_true",
+        help="Stage 2.7: detect RT-switching artifact junctions (non-canonical "
+             "motifs with >=4bp direct-repeat microhomology). Adds "
+             "rt_switching_score/rt_switching_flag columns without altering "
+             "any pre-existing column. Default: False (byte-identical baseline).")
+    parser.add_argument("--rt-switching-min-bp", type=int, default=4,
+        help="Stage 2.7: minimum direct-repeat microhomology length (bp) "
+             "between donor intron flank and acceptor exon flank to flag a "
+             "junction as RT-switching. Only consulted when --rt-switching-detect "
+             "is set. Default: 4 (SQANTI3 / Cocquet et al. literature default).")
 
     # Stage boundary fail-loud diagnostics (opt-in; default OFF so existing pipelines
     # keep their observed row counts byte-for-byte).
