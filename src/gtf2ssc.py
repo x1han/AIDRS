@@ -91,10 +91,22 @@ def main(input_gtf, workers, chunk_size, output_file=None):
     with open(output_file, 'w') as out:
         out.write("TrID\tGeneID\tGeneName\tChr\tStrand\tTrStart\tTrEnd\tSSC\n")
         for tr_id, info in merged.items():
-            sites = sorted(info['starts'] + info['ends'])
-            start = sites[0]
-            end = sites[-1]
-            inner = '-'.join(str(x) for x in sites[1:-1]) if len(sites) > 2 else 'NA'
+            # Exons must be in 5'->3' order to compute introns as consecutive
+            # pairs of (exon_i.end, exon_{i+1}.start). Sort defensively in case
+            # the GTF did not guarantee order.
+            sorted_pairs = sorted(zip(info['starts'], info['ends']))
+            starts_sorted = [p[0] for p in sorted_pairs]
+            ends_sorted = [p[1] for p in sorted_pairs]
+            # NOTE: do NOT concatenate starts and ends and sort them as a single
+            # list -- that destroys the exon pairing. For overlapping exons
+            # (e.g. E1=[100,250], E2=[200,400]) the sort-mix would emit
+            # inner="200-250" instead of the correct intron boundary "250-200".
+            intron_boundaries = zip(ends_sorted[:-1], starts_sorted[1:])
+            inner = '-'.join(f'{a}-{b}' for a, b in intron_boundaries)
+            start = starts_sorted[0]
+            end = ends_sorted[-1]
+            if not inner:
+                inner = 'NA'
             out.write(f"{tr_id}\t{info['GeneID']}\t{info.get('GeneName','NA')}\t{info['Chr']}\t{info['Strand']}\t{start}\t{end}\t{inner}\n")
 
 if __name__ == "__main__":
