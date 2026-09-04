@@ -20,8 +20,11 @@ exits. The wrapping pattern in aidrs.py is:
 
 The return value is always df_after unchanged, so output bytes are preserved.
 """
+import json
 import logging
+import os
 import sys
+import time
 import pandas as pd
 
 logger = logging.getLogger("AIDRS")
@@ -46,6 +49,8 @@ def stage_boundary_check(
     df_after: pd.DataFrame,
     strict_mode: bool = False,
     allow_zero: bool = False,
+    output_dir=None,
+    metadata: dict | None = None,
 ) -> pd.DataFrame:
     """Boundary guard for stage transitions.
 
@@ -55,6 +60,9 @@ def stage_boundary_check(
         df_after: dataframe at stage exit (post-filter).
         strict_mode: when True, sys.exit(1) on drop_rate >= fail_th.
         allow_zero: when True, suppress the catastrophic zero-row exit (testing).
+        metadata: optional caller-supplied context merged into the JSONL record
+            under a "metadata" key. Omitted entirely when None or empty, so
+            records from callers that pass nothing are unchanged.
 
     Returns:
         df_after unchanged -- function is logging-only, never modifies data.
@@ -101,5 +109,27 @@ def stage_boundary_check(
             stage_id, drop_rate, fail_th,
         )
         sys.exit(1)
+
+    if output_dir is not None:
+        _metrics_dir = os.path.join(output_dir, "metrics")
+        os.makedirs(_metrics_dir, exist_ok=True)
+        if drop_rate >= fail_th:
+            _level = "FAIL"
+        elif drop_rate >= warn_th:
+            _level = "WARNING"
+        else:
+            _level = "INFO"
+        _record = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "stage": stage_id,
+            "input": n_before,
+            "output": n_after,
+            "drop_rate": round(drop_rate, 2),
+            "level": _level,
+        }
+        if metadata:
+            _record["metadata"] = metadata
+        with open(os.path.join(_metrics_dir, "stage_drops.jsonl"), "a") as _fh:
+            _fh.write(json.dumps(_record) + "\n")
 
     return df_after

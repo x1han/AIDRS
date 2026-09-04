@@ -100,7 +100,7 @@ def isoform_assembling(bam, args, ref_anno=None):
     logger.info("\tStage 1.2: Filtering SSC with low read support...")
     _df12_before = df  # Stage 1.2 entry snapshot (reference; no copy)
     df = df[df['frequency'] >= args.filter_freq]
-    df = stage_boundary_check("1.2", _df12_before, df, args.strict_stage_checks, args.allow_zero_rows)
+    df = stage_boundary_check("1.2", _df12_before, df, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
     len_freq2 = len(df)
     logger.info(f"\tFrequency filtering completed. Retained {len(df)} SSC records.")
     
@@ -114,7 +114,7 @@ def isoform_assembling(bam, args, ref_anno=None):
     logger.info("\tStage 1.4: Analyzing splice junction motifs (canonical vs non-canonical)...")
     _df14_before = df  # Stage 1.4 entry snapshot
     df = junction_screening(df, junction_freq_ratio=args.junction_freq_ratio)
-    df = stage_boundary_check("1.4", _df14_before, df, args.strict_stage_checks, args.allow_zero_rows)
+    df = stage_boundary_check("1.4", _df14_before, df, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
     logger.info(f"\tJunction motif analysis completed. Retained {len(df)} SSC records.")
 
     # Stage 1.5: Consensus-based Junction Refinement
@@ -124,7 +124,7 @@ def isoform_assembling(bam, args, ref_anno=None):
                                       num_processes=args.threads)
     _df15_before = df  # Stage 1.5 entry snapshot
     df = consensusfilter.consensus(df)
-    df = stage_boundary_check("1.5", _df15_before, df, args.strict_stage_checks, args.allow_zero_rows)
+    df = stage_boundary_check("1.5", _df15_before, df, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
     logger.info(f"\tConsensus refinement completed. Retained {len(df)} SSC records.")
     
     # Stage 1.6: Low-confidence Junction Pruning
@@ -197,7 +197,7 @@ def isoform_assembling(bam, args, ref_anno=None):
         
     os.makedirs(os.path.join(args.output, "temp"), exist_ok=True)
     df.to_parquet(os.path.join(args.output, f"temp/{sample}.ssc_flnc_correct.parquet"))
-    df = stage_boundary_check("1.8", _df18_before, df, args.strict_stage_checks, args.allow_zero_rows)
+    df = stage_boundary_check("1.8", _df18_before, df, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
 
     logger.info(f"\tGraph-based isoform filtering completed. Retained {len(df)} SSC records.")
 
@@ -314,7 +314,7 @@ def isoform_validating(df, args, ref_anno=None):
             filter_freq=args.filter_freq,
             genome_fasta=genome_fasta,
         )
-        df_single_kept = stage_boundary_check("2.5b", _df25b_before, df_single_kept, args.strict_stage_checks, args.allow_zero_rows)
+        df_single_kept = stage_boundary_check("2.5b", _df25b_before, df_single_kept, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
         # Schema-alignment: pad all columns Stage 2.6+ and Stage 3 expect,
         # then align category dtype so pd.concat does not upcast/break Group.
         # Pillar-3 may yield zero rows (df_single_kept is None) -- guard below.
@@ -369,7 +369,7 @@ def isoform_validating(df, args, ref_anno=None):
         args.hard_filter,
         genome_fasta=genome_fasta,
     )
-    df = stage_boundary_check("2.6", _df26_before, df, args.strict_stage_checks, args.allow_zero_rows)
+    df = stage_boundary_check("2.6", _df26_before, df, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
     logger.info(f"TSS correction and filtering completed. Retained {len(df)} records.")
 
     return df
@@ -552,6 +552,10 @@ def main(cmd_args):
     os.makedirs(os.path.join(args.output, "temp"), exist_ok=True)
     logger = setup_logger(args.output)
     logger.info("=== AIDRS pipeline started === ")
+
+    logger.info("[BEGIN_RUN] mode=%s gtf=%s",
+                "de_novo" if args.gtf_anno is None else "reference_guided",
+                args.gtf_anno or "N/A")
 
     # Step 0: BAM/FASTA chromosome naming compatibility check (Fail-Fast)
     # Prevents silent empty-output when BAM uses 'chr1' but FASTA uses '1' (or vice versa).
