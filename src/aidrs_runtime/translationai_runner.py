@@ -96,8 +96,16 @@ class TranslationAIRunner:
         t1 = self._t1
 
         threshold_str = str(threshold_str)
-        TIS_score_cutoff = float(threshold_str.split(",")[0])
-        TTS_score_cutoff = float(threshold_str.split(",")[1])
+        # P1-4: validate threshold_str has exactly two comma-separated
+        # values before indexing. A malformed single-value or empty input
+        # would otherwise raise IndexError with no actionable context.
+        parts = threshold_str.split(",")
+        if len(parts) != 2:
+            raise ValueError(
+                f"threshold_str must be 'TIS,TTS' comma-separated; got {threshold_str!r}"
+            )
+        TIS_score_cutoff = float(parts[0])
+        TTS_score_cutoff = float(parts[1])
         if TIS_score_cutoff >= 1:
             TIS_score_cutoff = int(TIS_score_cutoff)
         if TTS_score_cutoff >= 1:

@@ -48,6 +48,10 @@ def count_single_bam(bam, threads_per_bam):
 
 def get_bam_read_counts(bam_files, threads):
     num_bams = len(bam_files)
+    # P1-1: guard Pool(processes=0) crash on empty bam_files. Caller decides
+    # whether empty bam_files is fatal (typically sys.exit, not our job).
+    if num_bams == 0:
+        return {}, 0
     threads_per_bam = max(1, threads // num_bams) if num_bams > 0 else 1
 
     with mp.Pool(processes=num_bams) as pool:
@@ -186,16 +190,31 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
                 if key not in seq_cache:
                     b = str_pos.split('-')
                     ds = ''
+                    # P1-2: pysam raises ValueError on out-of-range fetch
+                    # (k1=1 → k1-3=-2; contig-end positions exceed length).
+                    # Clamp to [0, contig_length] then wrap in try/except so
+                    # one edge read does not kill the whole per-chunk worker
+                    # and leave the temp file half-written.
+                    contig_len = fa.get_reference_length(read.reference_name) if read.reference_name else 0
+                    def _safe_fetch(start, end):
+                        s = max(0, min(start, contig_len))
+                        e = max(0, min(end, contig_len))
+                        if e <= s:
+                            return ''
+                        try:
+                            return fa.fetch(reference=read.reference_name, start=s, end=e)
+                        except (ValueError, KeyError):
+                            return ''
                     if strand == '+':
                         for i, k1 in enumerate(b):
                             k1 = int(k1)
-                            seq = fa.fetch(reference=read.reference_name, start=k1, end=k1+2) if i % 2 == 0 else fa.fetch(reference=read.reference_name, start=k1-3, end=k1-1)
+                            seq = _safe_fetch(k1, k1+2) if i % 2 == 0 else _safe_fetch(k1-3, k1-1)
                             ds += f'{seq}-' if i % 2 == 0 else f'{seq},'
                     else:
                         for i, k1 in enumerate(reversed(b)):
                             k1 = int(k1)
-                            seq = fa.fetch(reference=read.reference_name, start=k1-3, end=k1-1) if i % 2 == 0 else fa.fetch(reference=read.reference_name, start=k1, end=k1+2)
-                            seq = str(Seq(seq).reverse_complement())
+                            seq = _safe_fetch(k1-3, k1-1) if i % 2 == 0 else _safe_fetch(k1, k1+2)
+                            seq = str(Seq(seq).reverse_complement()) if seq else ''
                             ds += f'{seq}-' if i % 2 == 0 else f'{seq},'
                     ds = ds.rstrip(',')
                     seq_cache[key] = ds

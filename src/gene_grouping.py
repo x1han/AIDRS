@@ -102,6 +102,11 @@ class GeneClustering:
 
     @staticmethod
     def _single_strand_interval_clustering(df):
+        # P1-5: explicit empty-DataFrame guard. `df['end'].iloc[0]` on an
+        # empty frame raises IndexError that propagates up through
+        # _cluster_for_chr's groupby and kills the per-chr worker.
+        if df is None or len(df) == 0:
+            return df.assign(Group=pd.Series(dtype=np.int32)) if df is not None else df
         df = df.copy()
         df['start'] = df['SSC'].str.split('-').str[0].astype(np.int32)
         df['end'] = df['SSC'].str.split('-').str[-1].astype(np.int32)
@@ -139,7 +144,15 @@ class GeneClustering:
         })
 
         grouped = [group for _, group in df.groupby('Chr', observed=True)]
-        num_processes = min(self.num_processes, len(grouped))
+        # P1-3: coerce num_processes to a positive int. The previous code
+        # `min(self.num_processes, len(grouped))` raised TypeError when
+        # self.num_processes is None (default constructor value), and
+        # `min(0, n) == 0` then made `Pool(0)` raise ValueError on some
+        # platforms. Resolve to max(1, cpu_count()) when caller did not set
+        # an explicit count, then clamp to len(grouped) and re-floor to 1.
+        if self.num_processes is None or self.num_processes <= 0:
+            self.num_processes = max(1, mp.cpu_count())
+        num_processes = max(1, min(self.num_processes, len(grouped)))
 
         ctx = mp.get_context("spawn")
         with ctx.Pool(num_processes) as pool:
