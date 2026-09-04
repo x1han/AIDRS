@@ -1,3 +1,19 @@
+# IMPORTANT: _thread_guard must be imported before any module that transitively
+# imports numpy/pandas so the BLAS thread cap is set before fork.
+# Three-tier try/except makes the import robust under all invocation modes:
+#   1. python -m src.aidrs    (package mode → relative import)
+#   2. python src/aidrs.py    (script mode from parent dir, src is a package)
+#   3. cd src && python aidrs.py  (script mode from same dir → sys.path fallback)
+try:
+    from . import _thread_guard  # noqa: F401
+except ImportError:
+    try:
+        from src import _thread_guard  # noqa: F401
+    except ImportError:
+        import os as _os, sys as _sys
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+        import _thread_guard  # noqa: F401
+
 import sys
 import logging
 from traceback import print_exc
@@ -10,7 +26,7 @@ import re
 import pandas as pd
 from .common import *
 from .consensus import ConsensusFilter
-from .gene_grouping import GeneClustering
+from .gene_grouping import GeneClustering, SINGLE_EXON_GROUP_SENTINEL
 from .isoform_classify import IsoformClassifier
 from .remove_lowConfidence_junction import SpliceConsensusFilter
 from .SSC_graph_filter import SSCGraphFilter
@@ -21,6 +37,9 @@ from .generate_reports import IsoformAnnotator
 from .tss_annotation import TSS_Puffin
 from .polya_annotation import polyAnnotator
 from .protein_coding_ability import *
+from .gene_grouping import compute_is_intergenic_or_antisense
+from .single_exon import apply_5_pillar_funnel
+from .aidrs_runtime.stage_check import stage_boundary_check
 
 
 def setup_logger(output_dir):
@@ -59,9 +78,29 @@ def isoform_assembling(bam, args, ref_anno=None):
     len_freq1 = len(df)
     logger.info(f"\tData preprocessing completed. Loaded {len(df)} SSC records.")
 
+    # P3 single-exon routing: single-exon reads (SSC == 'NA' from bam2ssc) are routed through
+    # a separate path. They cannot participate in junction-based stages (1.2-2.5) because
+    # their SSC is not a parseable site list. Stash them on the args object for re-attachment
+    # at Stage 2.5b. Note: bam2ssc still writes 'NA' (not 'none') for backward compatibility
+    # with read_flnc in polya_annotation; the conversion to 'none' happens here.
+    if 'SSC' in df.columns:
+        single_exon_mask = df['SSC'] == 'NA'
+        n_single = int(single_exon_mask.sum())
+        if n_single > 0:
+            args._p3_single_exon_stash = df[single_exon_mask].copy()
+            args._p3_single_exon_stash['SSC'] = 'none'
+            df = df[~single_exon_mask].copy()
+            logger.info(f"\tP3 single-exon routing: stashed {n_single} single-exon rows (SSC=='NA' -> 'none') for Stage 2.5b; multi-exon pipeline continues with {len(df)} rows.")
+        else:
+            args._p3_single_exon_stash = None
+    else:
+        args._p3_single_exon_stash = None
+
     # Stage 1.2: Frequency-based SSC Filtering
     logger.info("\tStage 1.2: Filtering SSC with low read support...")
+    _df12_before = df  # Stage 1.2 entry snapshot (reference; no copy)
     df = df[df['frequency'] >= args.filter_freq]
+    df = stage_boundary_check("1.2", _df12_before, df, args.strict_stage_checks, args.allow_zero_rows)
     len_freq2 = len(df)
     logger.info(f"\tFrequency filtering completed. Retained {len(df)} SSC records.")
     
@@ -73,7 +112,9 @@ def isoform_assembling(bam, args, ref_anno=None):
     
     # Stage 1.4: Junction Motif Analysis
     logger.info("\tStage 1.4: Analyzing splice junction motifs (canonical vs non-canonical)...")
+    _df14_before = df  # Stage 1.4 entry snapshot
     df = junction_screening(df, junction_freq_ratio=args.junction_freq_ratio)
+    df = stage_boundary_check("1.4", _df14_before, df, args.strict_stage_checks, args.allow_zero_rows)
     logger.info(f"\tJunction motif analysis completed. Retained {len(df)} SSC records.")
 
     # Stage 1.5: Consensus-based Junction Refinement
@@ -81,7 +122,9 @@ def isoform_assembling(bam, args, ref_anno=None):
     consensusfilter = ConsensusFilter(consensus_bp = args.consensus_bp,
                                       consensus_ratio = args.consensus_ratio,
                                       num_processes=args.threads)
+    _df15_before = df  # Stage 1.5 entry snapshot
     df = consensusfilter.consensus(df)
+    df = stage_boundary_check("1.5", _df15_before, df, args.strict_stage_checks, args.allow_zero_rows)
     logger.info(f"\tConsensus refinement completed. Retained {len(df)} SSC records.")
     
     # Stage 1.6: Low-confidence Junction Pruning
@@ -97,11 +140,18 @@ def isoform_assembling(bam, args, ref_anno=None):
     df = filter_fragmentary_transcript(df, threshold_fragmentary_transcript_bp = args.threshold_fragmentary_transcript_bp)
     logger.info(f"\tFragmentary transcript filtering completed. Retained {len(df)} SSC records.")
 
-    df.to_parquet(os.path.join(args.output, f"temp/df.before_nnc_nic_graph.ssc_flnc.parquet"))
+    # Defensive makedirs: avoid intermittent "Cannot save file into a non-
+    # existent directory" when the temp/ path is missing at the time of
+    # to_parquet (intermittent race condition in Stage 1.7+. Idempotent.)
+    _temp_dir = os.path.join(args.output, "temp")
+    os.makedirs(_temp_dir, exist_ok=True)
+
+    df.to_parquet(os.path.join(_temp_dir, f"df.before_nnc_nic_graph.ssc_flnc.parquet"))
 
     # Stage 1.8: Novel Isoform Classification and Filtering (NNC/NIC)
     logger.info("\tStage 1.8: Classifying and filtering novel isoforms (NNC/NIC)...")
-    df.to_parquet(os.path.join(args.output, f"temp/{sample}.ssc_flnc.before_nnc_nic_graph.parquet"))
+    df.to_parquet(os.path.join(_temp_dir, f"{sample}.ssc_flnc.before_nnc_nic_graph.parquet"))
+    _df18_before = df  # Stage 1.8 entry snapshot
     ssc_graph_filter = SSCGraphFilter(
                         error_sites_diff_bp=args.error_sites_diff_bp,
                         error_sites_ratio=args.error_sites_ratio,
@@ -145,8 +195,10 @@ def isoform_assembling(bam, args, ref_anno=None):
         # Call main processing function
         df = refMapper.map_to_reference(df_raw, df, ref_anno)
         
+    os.makedirs(os.path.join(args.output, "temp"), exist_ok=True)
     df.to_parquet(os.path.join(args.output, f"temp/{sample}.ssc_flnc_correct.parquet"))
-    
+    df = stage_boundary_check("1.8", _df18_before, df, args.strict_stage_checks, args.allow_zero_rows)
+
     logger.info(f"\tGraph-based isoform filtering completed. Retained {len(df)} SSC records.")
 
     return df, sample
@@ -231,10 +283,93 @@ def isoform_validating(df, args, ref_anno=None):
     )
     df = truncationprocessor.assess_truncation(df, ref_anno)
 
+    # Stage 2.5b: Single-Exon 5-Pillar Funnel (5-pillar judge)
+    logger.info("Stage 2.5b: Applying single-exon 5-pillar funnel...")
+    # Pull single-exon rows from the stash set up in Stage 1.1 (P3 routing). The stash
+    # contains the original 'none' rows; the main df here is multi-exon only.
+    df_single = getattr(args, '_p3_single_exon_stash', None)
+    _df25b_before = df_single  # Stage 2.5b entry snapshot (single-exon subset)
+    n_single_input = len(df_single) if df_single is not None else 0
+    df_single_kept = None
+    # Hoist genome_fasta to function scope so Stage 2.6 (3-state polyA rescue)
+    # can reuse the same pysam.FastaFile handle. Lazy-loaded: only opened when
+    # needed (intra-priming checks) and the caller provided args.reference.
+    genome_fasta = None
+    if df_single is not None and len(df_single) > 0:
+        if 'seq_len' not in df_single.columns:
+            df_single['seq_len'] = (df_single['TrEnd'] - df_single['TrStart']).abs() + 1
+        df_single = compute_is_intergenic_or_antisense(df_single)
+        has_valid_polya = (df['polyA_frac'].notna().any()) if 'polyA_frac' in df.columns else False
+        if not has_valid_polya and getattr(args, 'reference', None):
+            try:
+                import pysam
+                genome_fasta = pysam.FastaFile(args.reference)
+            except Exception as _exc:
+                logger.warning("Failed to load reference genome for intra-priming check: %s", _exc)
+                genome_fasta = None
+        df_single_kept, _ = apply_5_pillar_funnel(
+            df_single,
+            has_valid_polya=has_valid_polya,
+            polyA_thresh=args.polya_fraction_threshold,
+            filter_freq=args.filter_freq,
+            genome_fasta=genome_fasta,
+        )
+        df_single_kept = stage_boundary_check("2.5b", _df25b_before, df_single_kept, args.strict_stage_checks, args.allow_zero_rows)
+        # Schema-alignment: pad all columns Stage 2.6+ and Stage 3 expect,
+        # then align category dtype so pd.concat does not upcast/break Group.
+        # Pillar-3 may yield zero rows (df_single_kept is None) -- guard below.
+        if df_single_kept is None or len(df_single_kept) == 0:
+            logger.info("Single-exon funnel kept 0 rows; skipping schema align/concat")
+        else:
+            for col in ('Puffin_TSS_15bp', 'Puffin_TSS_50bp', 'predict_NMD', 'junction'):
+                if col not in df_single_kept.columns:
+                    df_single_kept[col] = 'no'
+            for col in ('polyA_valid_reads',):
+                if col not in df_single_kept.columns:
+                    df_single_kept[col] = 0
+            # Mark single-exon rows so the rest of the pipeline (Stage 2.6) treats them as a
+            # separate category; multi-exon rows in df are already SSC != 'none'.
+            if 'SSC' not in df_single_kept.columns:
+                df_single_kept['SSC'] = 'none'
+            if 'Group' not in df_single_kept.columns:
+                df_single_kept['Group'] = SINGLE_EXON_GROUP_SENTINEL
+            # Align Chr/Strand categories with df so concat preserves the master
+            # category index and does not introduce NaN-typed Group column.
+            for cat_col in ('Chr', 'Strand'):
+                if cat_col in df.columns and cat_col in df_single_kept.columns:
+                    df_single_kept[cat_col] = (
+                        df_single_kept[cat_col].astype(str).astype('category')
+                    )
+                    df_single_kept[cat_col] = df_single_kept[cat_col].cat.set_categories(
+                        df[cat_col].cat.categories
+                    )
+            df = pd.concat([df, df_single_kept], ignore_index=True)
+    n_single_kept = len(df_single_kept) if df_single_kept is not None else 0
+    logger.info("Single-exon 5-pillar funnel: input=%d, kept=%d, total df=%d", n_single_input, n_single_kept, len(df))
+
     # Stage 2.6: Isoform Filtering
     logger.info("Stage 2.6: Applying TSS correction and filtering...")
     df.to_csv(os.path.join(args.output,'temp/aidrs.transcript.result_df.before_filter.tsv'),sep='\t', index=False)
-    df = transcript_model_filtering(df, args.puffin_prediction_threshold, args.polya_fraction_threshold, args.hard_filter)
+    _df26_before = df  # Stage 2.6 entry snapshot
+    # Idempotent genome_fasta load: open pysam.FastaFile for Stage 2.6 3-state
+    # polyA intra-priming rescue if not already opened in Stage 2.5b. When
+    # genome_fasta stays None, transcript_model_filtering preserves the legacy
+    # single-state polyA semantics (byte-identical baseline).
+    if genome_fasta is None and getattr(args, 'reference', None):
+        try:
+            import pysam
+            genome_fasta = pysam.FastaFile(args.reference)
+        except Exception as _exc:
+            logger.warning("Stage 2.6: failed to load reference genome for intra-priming check: %s", _exc)
+            genome_fasta = None
+    df = transcript_model_filtering(
+        df,
+        args.puffin_prediction_threshold,
+        args.polya_fraction_threshold,
+        args.hard_filter,
+        genome_fasta=genome_fasta,
+    )
+    df = stage_boundary_check("2.6", _df26_before, df, args.strict_stage_checks, args.allow_zero_rows)
     logger.info(f"TSS correction and filtering completed. Retained {len(df)} records.")
 
     return df
@@ -385,6 +520,18 @@ def parse_args(cmd_args):
              "TIS/TTS columns set to 'no' and Predict_NMD set to 'no_orf' for every "
              "transcript. CDS/UTR annotations in the GTF output will be empty.")
     parser.add_argument("--hard_filter", action="store_true", help="Hard filtering based on Puffin_TSS_15bp and polyA_frac thresholds.")
+
+    # Stage boundary fail-loud diagnostics (opt-in; default OFF so existing pipelines
+    # keep their observed row counts byte-for-byte).
+    parser.add_argument("--strict_stage_checks", action="store_true",
+        help="Enable strict stage-boundary checks: abort (sys.exit(1)) if any "
+             "of stages 1.2/1.4/1.5/1.8/2.5b/2.6 drops >= its fail threshold "
+             "(see stage_check.STAGE_THRESHOLDS). Default: False (informational "
+             "logging only).")
+    parser.add_argument("--allow-zero-rows", action="store_true",
+        help="Opt-out of the hard zero-row invariant in stage_boundary_check "
+             "(n_before>0 AND n_after==0 normally aborts the run). Intended "
+             "for testing/synthetic-data runs only. Default: False.")
     
     # Thresholds for splice site (SS) and transcription start/end site (TSS/TES) correction
     parser.add_argument("--ss_tolerance", type=int, default=15, help="Splice site tolerance threshold for correction. Default: 15")
@@ -405,6 +552,12 @@ def main(cmd_args):
     os.makedirs(os.path.join(args.output, "temp"), exist_ok=True)
     logger = setup_logger(args.output)
     logger.info("=== AIDRS pipeline started === ")
+
+    # Step 0: BAM/FASTA chromosome naming compatibility check (Fail-Fast)
+    # Prevents silent empty-output when BAM uses 'chr1' but FASTA uses '1' (or vice versa).
+    # Uses canonical-chromosome anchoring to avoid false-aborts from 3000+ decoy contigs.
+    from .aidrs_runtime.chrom_check import check_chromosome_naming_compatibility
+    check_chromosome_naming_compatibility(args.bam, args.reference)
 
     try:
         logger.info(f"Processing BAM files...")

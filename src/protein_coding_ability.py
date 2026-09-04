@@ -1,10 +1,18 @@
 #!/usr/bin/env python
 
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
+
 from Bio import SeqIO
 from Bio.Seq import Seq
 import pandas as pd
 from pyfaidx import Fasta
 import os
+import shutil
+import logging
+
+logger = logging.getLogger(__name__)
 from functools import partial
 
 # F3b: import the in-process TranslationAIRunner. The runner loads the 5 .h5
@@ -14,6 +22,10 @@ from .aidrs_runtime.translationai_runner import TranslationAIRunner
 
 class TranslationAI_ORF:
     def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=8):
+        # P7 fix: keep the original path string so we can ship it across the
+        # multiprocessing pickling boundary (a live pyfaidx.Fasta is a
+        # BufferedReader and cannot be pickled).
+        self.genome_path = genome
         self.genome = Fasta(genome)
         self.tmp_path = tmp_path
         self.translationai_score_threshold = translationai_score_threshold
@@ -26,8 +38,16 @@ class TranslationAI_ORF:
     @staticmethod
     def fetch_exon(row):
         chrom = str(row['Chr'])
-        start = int(row['TrStart'])      # 1-based
-        end   = int(row['TrEnd'])
+        # Defensive int() on coordinates: skip the row (return None) when
+        # TrStart/TrEnd are NaN/missing instead of crashing with
+        # "int() can't convert non-string with explicit base".
+        try:
+            start = int(row['TrStart'])      # 1-based
+            end   = int(row['TrEnd'])
+        except (TypeError, ValueError):
+            logger.debug("Skipping fetch_exon for %s:%s-%s due to NaN/inf coordinates",
+                         row.get('Chr', 'NA'), row.get('TrStart', 'NA'), row.get('TrEnd', 'NA'))
+            return None
         strand = str(row['Strand'])
         
         # Parse SSC column to get exon ranges
@@ -54,12 +74,27 @@ class TranslationAI_ORF:
     @staticmethod
     def fetch_seq(row, genome):
         chrom = str(row['Chr'])
-        start = int(row['TrStart'])      # 1-based
-        end   = int(row['TrEnd'])
-        
+        # Defensive int() on coordinates: skip the row (return '') when
+        # TrStart/TrEnd are NaN/missing instead of crashing with
+        # "int() can't convert non-string with explicit base". Caller
+        # (run_translationai) treats empty string as a no-op sequence.
+        try:
+            start = int(row['TrStart'])      # 1-based
+            end   = int(row['TrEnd'])
+        except (TypeError, ValueError):
+            logger.debug("Skipping fetch_seq for %s:%s-%s due to NaN/inf coordinates",
+                         row.get('Chr', 'NA'), row.get('TrStart', 'NA'), row.get('TrEnd', 'NA'))
+            return ''
+        strand = str(row['Strand'])
+
         # Parse SSC column to get exon ranges
         ssc = str(row['SSC'])
-        positions = [start] + list(map(int, ssc.split('-'))) + [end]
+        try:
+            positions = [start] + list(map(int, ssc.split('-'))) + [end]
+        except ValueError:
+            logger.debug("Skipping fetch_seq for %s:%s-%s due to unparseable SSC %s",
+                         chrom, start, end, ssc)
+            return ''
         
         # Convert position list to exon ranges (start, end)
         exon_ranges = []
@@ -82,13 +117,13 @@ class TranslationAI_ORF:
         seq_str = ''.join(exon_sequences)
         seq = Seq(seq_str)                         # turn into Biopython Seq
 
-        if row['Strand'] == '-':
+        if strand == '-':
             seq = seq.reverse_complement()
 
         return str(seq)
 
     @staticmethod
-    def run_translationai(df, genome, tmp_path, runner=None):
+    def run_translationai(df, genome, tmp_path, runner=None, worker_id=None):
         if df.empty:
             return
 
@@ -99,9 +134,11 @@ class TranslationAI_ORF:
 
         df_fasta['seq'] = df_fasta.apply(lambda row: TranslationAI_ORF.fetch_seq(row, genome), axis=1)
 
-        fasta_out_dir = os.path.join(tmp_path, "TranslationAI_temp/")
-        os.makedirs(fasta_out_dir, exist_ok=True)
-        fasta_out_path = fasta_out_dir + Chrom + "_" + Strand + ".fasta"
+        # P7 fanout: write the per-(Chr, Strand) FASTA directly into tmp_path
+        # (which, when called from a worker process, is the per-worker subdir
+        # {fanout_root}/worker_{pid}/). The pred* files then sit next to it.
+        os.makedirs(tmp_path, exist_ok=True)
+        fasta_out_path = os.path.join(tmp_path, f"{Chrom}_{Strand}.fasta")
 
         with open(fasta_out_path, "w") as fh:
             pass
@@ -117,10 +154,16 @@ class TranslationAI_ORF:
             )
             for idx, key in keys.items():
                 output_entries = []
-                seq = df_fasta.iloc[idx]['seq']
 
-                # Generate FASTA header
+                # Generate FASTA header and sequence in a single try block so
+                # that exceptions in seq access (KeyError), seq is None/NaN,
+                # or numeric conversion errors all skip the row instead of
+                # writing a corrupt literal "None"/"nan" into the FASTA file.
                 try:
+                    seq = df_fasta.iloc[idx]['seq']
+                    if seq is None or (isinstance(seq, float) and pd.isna(seq)) or seq == "":
+                        logger.debug("Skipping FASTA entry %d: empty/None sequence", idx)
+                        continue
                     seq_name = (
                         f">{df_fasta.iloc[idx]['Chr']}:"
                         f"{int(df_fasta.iloc[idx]['TrStart'])}-"
@@ -131,9 +174,9 @@ class TranslationAI_ORF:
                         f"{int(0)},)"
                     )
                     output_entries.append(f"{seq_name}\n{seq}\n")
-                except (KeyError, ValueError) as e:
-                    # Handle missing fields or type errors
-                    print(f"Skipping entry at index {idx}: {str(e)}")
+                except (KeyError, ValueError, TypeError) as e:
+                    # Handle missing fields, type errors, or unparseable SSCs
+                    logger.warning("Skipping FASTA entry at index %d: %s", idx, e)
                     continue
 
                 # Batch write to file
@@ -148,19 +191,116 @@ class TranslationAI_ORF:
                 "TranslationAI runner not initialised; F3b requires an "
                 "in-process TranslationAIRunner."
             )
-        runner.predict_fasta(fasta_out_path, threshold_str="0.5,0.5")
+        runner.predict_fasta(fasta_out_path, threshold_str="0.5,0.5", worker_id=worker_id)
 
     def orf_predict_by_translationai(self, df):
-        # F3b: replaced per-(Chr, Strand) subprocess fan-out with the in-process
-        # TranslationAIRunner. The 5 .h5 models are loaded once at __init__ and
-        # reused for every group; no subprocess is spawned.
+        # P7 fanout: distribute (Chr, Strand) groups across worker processes
+        # via ProcessPoolExecutor (dynamic scheduling — the pool reclaims a
+        # slot the moment any worker finishes, so a tiny Chr1+ group doesn't
+        # stall behind a giant Chr3- group sitting on a busy worker). Each
+        # worker owns its own 5-model ensemble and writes into a deterministic
+        # per-(Chr, Strand) subdir under TranslationAI_temp/. Groups assigned
+        # to the same worker are processed sequentially WITHIN that worker
+        # (preserves BLAS determinism per-strand); across workers the order
+        # is free (as_completed).
         df_groups = [g for _, g in df.groupby(['Chr','Strand'], observed=True)]
+        if not df_groups:
+            return
+        num_workers = max(1, min(self.num_processes, len(df_groups)))
+
+        # P7.2 re-run safety: blow away any stale outputs from a prior
+        # crashed run BEFORE we kick off the pool, so aggr_translationai_result
+        # never mixes old _pred* files with new ones. fanout_root itself is
+        # the directory aggr_translationai_result is called against;
+        # workers nest their per-(Chr, Strand) subdirs inside it.
+        fanout_root = os.path.join(self.tmp_path, "TranslationAI_temp")
+        shutil.rmtree(fanout_root, ignore_errors=True)
+        os.makedirs(fanout_root, exist_ok=True)
+
+        # P7.1 dynamic chunking: one task per (Chr, Strand) group, executor
+        # does the scheduling. No round-robin pre-slicing — groups are
+        # submitted individually so a fast-finishing worker immediately
+        # picks up the next group. Each task carries the group wrapped in a
+        # one-element list to preserve the worker's "iterable of groups"
+        # contract without re-shaping the worker signature.
+        tasks = [
+            ([df_group], self.genome_path, fanout_root, idx)
+            for idx, df_group in enumerate(df_groups)
+        ]
+
+        # spawn context: avoid forking the parent's already-loaded TF / h5py
+        # state into every worker (which would defeat the "no model sharing
+        # across processes" constraint and risk CUDA / BLAS re-init races).
+        ctx = mp.get_context("spawn")
+        try:
+            with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as executor:
+                futures = [
+                    executor.submit(TranslationAI_ORF._run_translationai_worker, task)
+                    for task in tasks
+                ]
+                # as_completed drains in finish-order so a misbehaving worker
+                # surfaces its exception early instead of lingering at the
+                # back of the queue. future.result() re-raises any worker
+                # exception; we swallow per-future so the main loop keeps
+                # detecting the BrokenProcessPool below — which is the hard
+                # backstop for "at least one worker died".
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception:
+                        pass
+        except BrokenProcessPool as e:
+            raise RuntimeError(
+                f"TranslationAI worker pool broken: {e}"
+            ) from e
+
+    @staticmethod
+    def _run_translationai_worker(args):
+        """Per-process worker: load 5 models, process its assigned
+        (Chr, Strand) group(s) sequentially, write outputs to a deterministic
+        per-(Chr, Strand) subdir of fanout_root.
+
+        The df_groups argument is an iterable of per-(Chr, Strand)
+        DataFrames (today: a one-element list, since the executor submits
+        one group per task). Groups are processed sequentially so BLAS
+        stays deterministic per-strand; sibling worker processes run in
+        parallel but each holds an independent 5-model ensemble.
+
+        Tuple: (chr_strand_groups, genome_path, fanout_root, runner_id).
+        """
+        df_groups, genome_path, fanout_root, runner_id = args
+
+        # CRITICAL: collapse TF intra/inter-op threads to 1. With multiple
+        # worker processes, leaving TF to grab "all" cores would cause thread
+        # contention that breaks per-strand determinism (different run → same
+        # byte output is a P7 hard requirement).
+        import tensorflow as tf
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+
+        # P7 fix: open pyfaidx.Fasta inside the worker (a live Fasta handle
+        # cannot survive pickle across the spawn boundary).
+        genome = Fasta(genome_path)
+
+        # Each worker instantiates its own TranslationAIRunner — own 5-model
+        # ensemble. No model sharing across processes (per the P7 contract).
+        runner = TranslationAIRunner()
+
         for df_group in df_groups:
+            Chrom = str(df_group['Chr'].unique()[0])
+            Strand = str(df_group['Strand'].unique()[0])
+            # P7.2 deterministic, content-addressed output dir: same
+            # (Chr, Strand) → same path on rerun, so the outer rmtree in
+            # orf_predict_by_translationai guarantees a clean slate without
+            # pid-name races.
+            worker_dir = os.path.join(fanout_root, f"{Chrom}_{Strand}")
+            os.makedirs(worker_dir, exist_ok=True)
             TranslationAI_ORF.run_translationai(
                 df_group,
-                genome=self.genome,
-                tmp_path=self.tmp_path,
-                runner=self._runner,
+                genome=genome,
+                tmp_path=worker_dir,
+                runner=runner,
+                worker_id=runner_id,
             )
     
     @staticmethod
@@ -191,7 +331,12 @@ class TranslationAI_ORF:
                 
                 # Get exon ranges
                 exon_ranges = TranslationAI_ORF.fetch_exon(row)
-                
+                if exon_ranges is None:
+                    # fetch_exon returned None due to NaN/inf coordinates (P1-9).
+                    # Treat as 'no_orf' rather than crashing the worker.
+                    df.at[idx, 'predict_NMD'] = 'no_orf'
+                    return 'no_orf'
+
                 # EJC-dependent NMD determination
                 ejc_dependent_nmd = False
                 if len(exon_ranges) >= 2:
@@ -224,11 +369,7 @@ class TranslationAI_ORF:
                     ejc_independent_nmd = True
                 
                 # Comprehensive NMD status determination
-                if ejc_dependent_nmd and ejc_independent_nmd:
-                    return 'NMD'
-                elif ejc_dependent_nmd:
-                    return 'NMD'
-                elif ejc_independent_nmd:
+                if (ejc_dependent_nmd or ejc_independent_nmd):
                     return 'NMD'
                 else:
                     return 'Normal'
@@ -243,25 +384,30 @@ class TranslationAI_ORF:
     
     def aggr_translationai_result(self, df, translationai_out_path):
         all_lines = []
-        for name in os.listdir(translationai_out_path):
-            if name.endswith("_predORFs_0.5_0.5.txt"):
-                file_path = os.path.join(translationai_out_path, name)
-                
-                # Check if file exists and is not empty
-                if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-                    continue
-                try:
-                    with open(file_path, 'r') as f:
-                        lines = f.readlines()
-                        # Filter empty lines and lines with only whitespace
-                        non_empty_lines = [line for line in lines if line.strip()]
-                        if non_empty_lines:
-                            all_lines.extend(non_empty_lines)
-                        else:
-                            print(f"Warning: File contains no valid data: {file_path}")
-                except (IOError, OSError) as e:
-                    print(f"Error reading file {file_path}: {e}")
-                    continue
+        # P7 fanout: workers nest outputs under
+        # {translationai_out_path}/{Chr}_{Strand}/, so walk the tree to
+        # collect every _predORFs_0.5_0.5.txt regardless of which worker
+        # produced it.
+        for root, _, files in os.walk(translationai_out_path):
+            for name in files:
+                if name.endswith("_predORFs_0.5_0.5.txt"):
+                    file_path = os.path.join(root, name)
+
+                    # Check if file exists and is not empty
+                    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                        continue
+                    try:
+                        with open(file_path, 'r') as f:
+                            lines = f.readlines()
+                            # Filter empty lines and lines with only whitespace
+                            non_empty_lines = [line for line in lines if line.strip()]
+                            if non_empty_lines:
+                                all_lines.extend(non_empty_lines)
+                            else:
+                                print(f"Warning: File contains no valid data: {file_path}")
+                    except (IOError, OSError) as e:
+                        print(f"Error reading file {file_path}: {e}")
+                        continue
         
         # Parse translationai output results and create DataFrame
         results = []
@@ -346,10 +492,25 @@ class TranslationAI_ORF:
 
                 translationai_subset = translationai_subset.astype(dtypes_df)
 
+                # TranslationAI can return multiple predicted ORFs (different
+                # TIS/TTS positions) for the same physical transcript model
+                # (TrStart, SSC, TrEnd). With how='outer' the merge would
+                # duplicate the transcript row per predicted ORF, inflating
+                # the dataframe (Case 1 +1 vs Case 3 in the chr1 factorial
+                # run showed 2408 phantom rows, 1591 of them truncation=yes).
+                # Fix: keep only the highest-TIS_score ORF per physical model,
+                # then how='left' so annotation NEVER adds new transcript rows.
+                if "TIS_score" in translationai_subset.columns:
+                    translationai_subset = translationai_subset.sort_values(
+                        by="TIS_score", ascending=False
+                    ).drop_duplicates(
+                        subset=["Chr", "Strand", "TrStart", "SSC", "TrEnd"],
+                        keep="first",
+                    )
                 df_merged = df_group.merge(
-                    translationai_subset, 
+                    translationai_subset,
                     on=["Chr", "Strand", "TrStart", "SSC", "TrEnd"],
-                    how='outer'
+                    how='left'
                 )
                 merged_df_list.append(df_merged)
 
