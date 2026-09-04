@@ -299,7 +299,7 @@ def isoform_validating(df, args, ref_anno=None):
     if df_single is not None and len(df_single) > 0:
         if 'seq_len' not in df_single.columns:
             df_single['seq_len'] = (df_single['TrEnd'] - df_single['TrStart']).abs() + 1
-        df_single = compute_is_intergenic_or_antisense(df_single)
+        df_single = compute_is_intergenic_or_antisense(df_single, df_multi=df)
         has_valid_polya = (df['polyA_frac'].notna().any()) if 'polyA_frac' in df.columns else False
         if not has_valid_polya and getattr(args, 'reference', None):
             try:
