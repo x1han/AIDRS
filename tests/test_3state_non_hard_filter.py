@@ -1,12 +1,27 @@
 """Quick sanity test for non-hard_filter path (default) of 3-state polyA."""
 import sys
+import os
+import importlib.util
 import pandas as pd
 import numpy as np
 
 REPO = "/datf/hanxi/software/AIDRS/repo"
 sys.path.insert(0, REPO)
+_SRC = os.path.join(REPO, "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
-from src.common import transcript_model_filtering
+# Bypass src/__init__.py (pre-existing missing SINGLE_EXON_GROUP_SENTINEL
+# constant in src/gene_grouping.py blocks aidrs.py import).
+_spec_pkg = importlib.util.spec_from_loader("src", loader=None, is_package=True)
+_src_pkg = importlib.util.module_from_spec(_spec_pkg)
+_src_pkg.__path__ = [_SRC]
+sys.modules["src"] = _src_pkg
+_spec = importlib.util.spec_from_file_location("src.common", os.path.join(_SRC, "common.py"))
+_common_mod = importlib.util.module_from_spec(_spec)
+sys.modules["src.common"] = _common_mod
+_spec.loader.exec_module(_common_mod)
+transcript_model_filtering = _common_mod.transcript_model_filtering
 
 
 def make_non_hard_filter_df():
