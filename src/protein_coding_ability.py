@@ -541,6 +541,25 @@ class TranslationAI_ORF:
 
                 tss_col = 'TrStart' if Strand == '+' else 'TrEnd'
 
+                # F-008 fix: drop TranslationAI result columns from df_group
+                # BEFORE merge. df_group enters this stage with TIS/TTS
+                # columns pre-populated with the 'no' sentinel (see the
+                # default-fill loop at the end of this function). If left
+                # in place, the merge on Chr/Strand/TrStart/SSC/TrEnd would
+                # produce pandas _x/_y suffix columns for TIS/TTS and the
+                # downstream `if col not in df.columns` check would then
+                # create a fresh 'no'-filled TIS_related_location column,
+                # silently discarding every TranslationAI prediction.
+                # Dropping here lets translationai_subset's values land in
+                # clean column names so check_nmd at the end sees real TIS/TTS.
+                _tai_result_cols = [
+                    'TIS_related_location', 'TTS_related_location',
+                    'TIS_score', 'TTS_score',
+                ]
+                df_group = df_group.drop(
+                    columns=[c for c in _tai_result_cols if c in df_group.columns]
+                )
+
                 translationai_subset = meriged_translationai_res[
                     (meriged_translationai_res['Chr'] == Chrom) &
                     (meriged_translationai_res['Strand'] == Strand)
