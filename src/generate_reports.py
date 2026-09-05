@@ -145,21 +145,12 @@ class IsoformAnnotator:
             table.to_csv(os.path.join(output_dir, f'aidrs_{name}.tsv'),
                          sep='\t')
         # ---- 6. Original assessment table ----
-        # P1-6: propagate Stage 2.7 rt_switching_flag/score columns to the
-        # final assessment TSV. Without this they are silently dropped at
-        # report-generation time even though Stage 2.7 logs the count.
-        # Columns are only added when present, so legacy runs without
-        # --rt-switching-detect are byte-identical.
-        _ASSESS_COLS = [
-            'Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'frequency',
-            'Puffin_TSS_15bp', 'Puffin_TSS_50bp', 'polyA_frac',
-            'TIS_related_location', 'TTS_related_location',
-            'TIS_score', 'TTS_score', 'Predict_NMD', 'truncation',
-            'TrID', 'GeneID', 'GeneName', 'seq_len',
-        ]
-        for _c in ('rt_switching_score', 'rt_switching_flag'):
-            if _c in df_result_after_quant.columns and _c not in _ASSESS_COLS:
-                _ASSESS_COLS.append(_c)
+        # P0-C: column registry in aidrs_runtime.column_registry centralizes
+        # the schema so future stages opt-in new columns without touching
+        # generate_reports.py. Order preserves byte-identical output for
+        # legacy runs (17-col C107 100k baseline SHA a8469106...).
+        from .aidrs_runtime.column_registry import resolve_assessment_columns
+        _ASSESS_COLS = resolve_assessment_columns(df_result_after_quant)
         df_result_after_quant[_ASSESS_COLS].drop_duplicates().to_csv(os.path.join(output_dir,
                       'aidrs.transcript.assessment.tsv'), sep='\t', index=False)
 
