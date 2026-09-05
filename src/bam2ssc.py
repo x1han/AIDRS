@@ -119,14 +119,15 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
             processed_lines += 1
 
             astrand = '-' if read.is_reverse else '+'
-            xs = ts = erro = None
+            xs = ts = None
+            error = None
             for tag, value in read.tags:
                 if tag == 'XS':
                     xs = value
                 elif tag == 'ts':
                     ts = value
                 elif tag == 'NM':
-                    erro = value
+                    error = value
             if ts and not xs and ts in ('+', '-'):
                 xs = ('+' if ts == '-' else '-') if read.is_reverse else ts
             strand = xs or astrand
@@ -153,7 +154,17 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
             positions.extend([pos, end])
 
             seqlen = len(read.query_sequence)
-            identity = 1 - (erro / cov) if cov else 0
+            # P0-A: NM tag (edit distance) is required for identity calculation.
+            # Some aligners (e.g. minimap2 without -A) omit it. When missing,
+            # warn and default to identity=1.0 rather than crashing on
+            # None / cov TypeError downstream.
+            if error is None:
+                logger.warning(
+                    f"Read {read.query_name}: NM tag missing, treating identity as 1.0"
+                )
+                identity = 1.0
+            else:
+                identity = 1 - (error / cov) if cov else 0
             coverage = (seqlen - clip) / seqlen if seqlen else 0
 
             id_count[read.query_name] += 1
