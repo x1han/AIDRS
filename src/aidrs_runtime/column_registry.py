@@ -7,7 +7,8 @@ OPTIONAL_ASSESSMENT_COLS (or a successor list) to participate in the
 assessment TSV -- they will NOT appear otherwise.
 
 P0-C: introduced after Stage 2.7 rt_switching_flag/score were silently
-dropped because generate_reports.py:148 hardcoded the column list.
+dropped because generate_reports.save_results hardcoded the column
+list (see _ASSESS_COLS site in src/generate_reports.py).
 """
 from typing import List
 
