@@ -47,6 +47,17 @@ packages = ["aidrs", "translationai"]
 "aidrs" = "src"
 "translationai" = "aided/TranslationAI/translationai"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+python_classes = ["Test*"]
+addopts = "-v --tb=short"
+markers = [
+    "torch: marks tests as requiring torch (deselect with -m 'not torch')",
+    "slow: marks tests as slow",
+]
+
 [tool.setuptools.package-data]
 translationai = [
     "models/translationAI_2000_l1.h5",
