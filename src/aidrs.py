@@ -322,7 +322,7 @@ def isoform_validating(df, args, ref_anno=None):
         if df_single_kept is None or len(df_single_kept) == 0:
             logger.info("Single-exon funnel kept 0 rows; skipping schema align/concat")
         else:
-            for col in ('Puffin_TSS_15bp', 'Puffin_TSS_50bp', 'predict_NMD', 'junction'):
+            for col in ('Puffin_TSS_15bp', 'Puffin_TSS_50bp', 'Predict_NMD', 'junction'):
                 if col not in df_single_kept.columns:
                     df_single_kept[col] = 'no'
             for col in ('polyA_valid_reads',):

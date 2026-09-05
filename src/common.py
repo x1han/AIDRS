@@ -414,7 +414,7 @@ def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fract
             #   State 1 -> polyA_frac > threshold
             #   State 2 -> FSM-rescued OR NOT intra-priming
             #   State 3 -> bypass (NaN)
-            mask_puffin = df_group_sub['Puffin_TSS_15bp'].gt(0.02)
+            mask_puffin = df_group_sub['Puffin_TSS_15bp'].gt(puffin_prediction_threshold)
             mask_polya_kept = (
                 df_group_sub['polyA_frac'].gt(polya_fraction_threshold)
                 | mask_state2_kept
