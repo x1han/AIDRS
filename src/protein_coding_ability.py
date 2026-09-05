@@ -11,6 +11,7 @@ from pyfaidx import Fasta
 import os
 import shutil
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 from functools import partial
@@ -191,7 +192,7 @@ class TranslationAI_ORF:
                 "TranslationAI runner not initialised; F3b requires an "
                 "in-process TranslationAIRunner."
             )
-        runner.predict_fasta(fasta_out_path, threshold_str="0.5,0.5", worker_id=worker_id)
+        runner.predict_fasta(fasta_out_path, threshold_str="0.5,0.5")
 
     def orf_predict_by_translationai(self, df):
         # P7 fanout: distribute (Chr, Strand) groups across worker processes
@@ -248,17 +249,53 @@ class TranslationAI_ORF:
                     executor.submit(TranslationAI_ORF._run_translationai_worker, task)
                     for task in tasks
                 ]
-                # as_completed drains in finish-order so a misbehaving worker
-                # surfaces its exception early instead of lingering at the
-                # back of the queue. future.result() re-raises any worker
-                # exception; we swallow per-future so the main loop keeps
-                # detecting the BrokenProcessPool below — which is the hard
-                # backstop for "at least one worker died".
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception:
-                        pass
+                # Industrial-grade worker death detection (replaces silent-swallow).
+                # Collect ALL worker exceptions instead of swallowing; raise
+                # RuntimeError after pool drains if any died. Also guard the
+                # "all workers exit 0 but produce 0 files" silent path via a
+                # post-condition rglob on fanout_root.
+                failed_workers = []
+
+                try:
+                    for future in as_completed(futures):
+                        exc = future.exception()
+                        if exc is not None:
+                            failed_workers.append(exc)
+                            logger.critical(
+                                f"[TranslationAI WORKER CRASHED]: {exc}",
+                                exc_info=exc,
+                            )
+                        else:
+                            # Explicit result() to surface any blocking issue
+                            # not surfaced via .exception()
+                            future.result()
+                except Exception as pool_err:
+                    logger.critical(
+                        f"[TranslationAI POOL FAILURE]: ProcessPoolExecutor failed: {pool_err}",
+                        exc_info=pool_err,
+                    )
+                    raise RuntimeError(
+                        f"[FATAL] TranslationAI process pool failed: {pool_err}"
+                    ) from pool_err
+
+                # 1. Block on worker-level crashes
+                if failed_workers:
+                    raise RuntimeError(
+                        f"[FATAL] {len(failed_workers)}/{len(futures)} "
+                        f"TranslationAI worker(s) crashed! "
+                        f"First error: {failed_workers[0]!r}. "
+                        f"Check logs for full tracebacks."
+                    )
+
+                # 2. Block on silent zero-output path (Caveat 3)
+                pred_files = list(Path(fanout_root).rglob("*_predORFs_0.5_0.5.txt"))
+                if len(df_groups) > 0 and not pred_files:
+                    raise RuntimeError(
+                        f"[FATAL] TranslationAI completed with exit code 0, but "
+                        f"produced ZERO _predORFs_0.5_0.5.txt files under "
+                        f"{fanout_root}! This indicates silent failure during "
+                        f"inference or empty model loading."
+                    )
         except BrokenProcessPool as e:
             raise RuntimeError(
                 f"TranslationAI worker pool broken: {e}"
@@ -505,7 +542,7 @@ class TranslationAI_ORF:
                 tss_col = 'TrStart' if Strand == '+' else 'TrEnd'
 
                 translationai_subset = meriged_translationai_res[
-                    (meriged_translationai_res['Chr'] == Chrom) & 
+                    (meriged_translationai_res['Chr'] == Chrom) &
                     (meriged_translationai_res['Strand'] == Strand)
                 ]
 
