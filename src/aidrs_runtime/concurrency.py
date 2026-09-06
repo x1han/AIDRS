@@ -7,10 +7,43 @@ silent chromosome-level data loss that no test can detect without explicit
 SHA divergence checks.
 """
 
+import ctypes
 import logging
-from concurrent.futures import as_completed
+import signal
+from concurrent.futures import as_completed, ProcessPoolExecutor
 
 logger = logging.getLogger("AIDRS")
+
+
+def _worker_death_pact():
+    """Initializer that wires PR_SET_PDEATHSIG=SIGKILL into each worker.
+
+    Linux-only: requests that the kernel deliver SIGKILL to this process
+    if its parent dies, so orphan workers cannot outlive the orchestrator
+    and burn CPU after a crash. Failures (non-Linux, missing libc, etc.)
+    are swallowed because the pact is best-effort observability, not a
+    correctness invariant.
+    """
+    try:
+        PR_SET_PDEATHSIG = 1
+        libc = ctypes.CDLL("libc.so.6")
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def get_process_pool(num_workers, mp_context=None):
+    """Factory for a ProcessPoolExecutor with the death-pact initializer.
+
+    Every worker process is set up with PR_SET_PDEATHSIG=SIGKILL so that
+    orphan workers terminate immediately if the parent process dies,
+    instead of being reparented to init/1 and continuing to consume CPU
+    (observed 128% CPU two days after the parent was killed).
+    """
+    kwargs = {"max_workers": num_workers, "initializer": _worker_death_pact}
+    if mp_context is not None:
+        kwargs["mp_context"] = mp_context
+    return ProcessPoolExecutor(**kwargs)
 
 
 def drain_futures_loud(futures, stage_name, allow_partial=False):

@@ -2,7 +2,7 @@ import sys
 import gzip
 import re
 from concurrent.futures import ProcessPoolExecutor
-from .aidrs_runtime.concurrency import drain_futures_loud
+from .aidrs_runtime.concurrency import drain_futures_loud, get_process_pool
 from collections import defaultdict
 import argparse
 
@@ -78,7 +78,7 @@ def read_gtf_chunks(input_file, chunk_size=10000):
             yield chunk
 
 def main(input_gtf, workers, chunk_size, output_file=None):
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with get_process_pool(num_workers=workers) as executor:
         futures = []
         for chunk in read_gtf_chunks(input_gtf, chunk_size=chunk_size):
             futures.append(executor.submit(process_chunk, chunk))

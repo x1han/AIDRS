@@ -151,7 +151,9 @@ class IsoformAnnotator:
         # legacy runs (17-col C107 100k baseline SHA a8469106...).
         from .aidrs_runtime.column_registry import resolve_assessment_columns
         _ASSESS_COLS = resolve_assessment_columns(df_result_after_quant)
-        df_result_after_quant[_ASSESS_COLS].drop_duplicates().to_csv(os.path.join(output_dir,
+        df_result_after_quant[_ASSESS_COLS].drop_duplicates(
+            subset=["Chr", "Strand", "TrStart", "TrEnd", "SSC"]
+        ).to_csv(os.path.join(output_dir,
                       'aidrs.transcript.assessment.tsv'), sep='\t', index=False)
 
 

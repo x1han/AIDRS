@@ -20,7 +20,7 @@ from functools import partial
 # keras models once and serves all sequences; orf_predict_by_translationai
 # no longer spawns one subprocess per (Chr, Strand).
 from .aidrs_runtime.translationai_runner import TranslationAIRunner
-from .aidrs_runtime.concurrency import drain_futures_loud
+from .aidrs_runtime.concurrency import drain_futures_loud, get_process_pool
 
 class TranslationAI_ORF:
     def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=8):
@@ -245,7 +245,7 @@ class TranslationAI_ORF:
         # across processes" constraint and risk CUDA / BLAS re-init races).
         ctx = mp.get_context("spawn")
         try:
-            with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as executor:
+            with get_process_pool(num_workers=num_workers, mp_context=ctx) as executor:
                 futures = [
                     executor.submit(TranslationAI_ORF._run_translationai_worker, task)
                     for task in tasks
