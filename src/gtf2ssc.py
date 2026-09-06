@@ -1,7 +1,8 @@
 import sys
 import gzip
 import re
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
+from .aidrs_runtime.concurrency import drain_futures_loud
 from collections import defaultdict
 import argparse
 
@@ -77,13 +78,13 @@ def read_gtf_chunks(input_file, chunk_size=10000):
             yield chunk
 
 def main(input_gtf, workers, chunk_size, output_file=None):
-    all_results = []
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = []
         for chunk in read_gtf_chunks(input_gtf, chunk_size=chunk_size):
             futures.append(executor.submit(process_chunk, chunk))
-        for future in as_completed(futures):
-            all_results.append(future.result())
+        # Fail-loud: drain futures via shared helper (consistency with
+        # other ProcessPoolExecutor sites in AIDRS).
+        all_results = drain_futures_loud(futures, stage_name="gtf2ssc")
     merged = merge_dicts(all_results)
 
     if output_file is None:
