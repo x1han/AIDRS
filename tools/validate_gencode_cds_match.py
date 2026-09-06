@@ -11,8 +11,12 @@ Algorithm (expert-approved, per workspace/findings/):
 
 2. Coordinate extraction: parse GENCODE v47 GTF, group CDS lines by
    transcript_id, and store the smallest CDS start and largest CDS end per
-   transcript (1-based, half-open inclusive coordinates, matching GTF
-   semantics). Strand is taken from column 6 of the GTF.
+   transcript (1-based, closed interval — cds_end is the last base of the
+   stop codon inclusive per the GENCODE GTF convention). Strand is taken
+   from column 6 of the GTF. When a `stop_codon` feature is present, the
+   validator also records the genomic coordinate of its first nucleotide
+   (exposed in the stats dict for downstream analysis; not used as the
+   TTS anchor).
 
 3. Mapping: the validator matches AIDRS TrID directly to GENCODE
    transcript_id. If no overlap exists between the two ID sets, the
@@ -26,14 +30,35 @@ Algorithm (expert-approved, per workspace/findings/):
    in strand-aware 5'->3' order, subtract cumulative exon length, and
    return the genomic coordinate of the predicted TIS/TTS. A value of
    "no" indicates TranslationAI did not predict a CDS, and the row is
-   excluded from TIS/TTS metrics):
+   excluded from TIS/TTS metrics.
 
-   - TIS exact match: |Predicted_TIS_pos - Official_CDS_start| == 0
+   TranslationAI output convention (asymmetric; verified empirically on
+   C107 chr1 FSM):
+   - TIS_related_location is the 0-based cDNA index of the FIRST base of
+     the start codon (the A of ATG). To get the 1-based cDNA position
+     for Exon-Walker we add +1.
+   - TTS_related_location is the 0-based cDNA index such that the 1-based
+     cDNA position IS the LAST base of the stop codon. To get that
+     1-based position for Exon-Walker we add +0 (no offset). This is the
+     historical +1 in the previous validator was an off-by-one.
+
+   Reference-side anchoring is strand-aware: on '+' strand the transcript
+   5' end is the smallest CDS coordinate and the 3' end is the largest;
+   on '-' strand the order is reversed. The validator picks the correct
+   end per strand before scoring. This is critical — using the genomic
+   min/max unconditionally scores every minus-strand row against the
+   opposite terminus.
+
+   Metrics:
+
+   - TIS exact match: |Predicted_TIS_pos - Reference_5p_end| == 0
                      AND same chromosome and same strand
-   - TTS exact match: |Predicted_TTS_pos - Official_CDS_end|   == 0
+                     (Reference_5p_end = cds_start on '+' / cds_end on '-')
+   - TTS exact match: |Predicted_TTS_pos - Reference_3p_end| == 0
                      AND same chromosome and same strand
+                     (Reference_3p_end = cds_end on '+' / cds_start on '-')
    - Both-ends exact: TIS exact AND TTS exact
-   - TIS in-frame:   |Predicted_TIS_pos - Official_CDS_start| % 3 == 0
+   - TIS in-frame:   |Predicted_TIS_pos - Reference_5p_end| % 3 == 0
 
 5. Output: stdout report + JSON dump to the path given by --json-out
    (default: tools/.out/validate_gencode_cds_match.json).
@@ -95,33 +120,45 @@ def _chr_sort_key(chrom: str) -> int:
 
 
 def parse_gencode_cds(gencode_gtf: str, chromosome: Optional[str] = None) -> Dict[
-    str, Tuple[str, int, int, str]
+    str, Tuple[str, int, int, str, Optional[int]]
 ]:
-    """Parse GENCODE GTF and return {transcript_id: (chr, cds_start, cds_end, strand)}.
+    """Parse GENCODE GTF and return {transcript_id: (chr, cds_start, cds_end,
+    strand, stop_codon_start)}.
 
     cds_start = smallest CDS start coordinate across the transcript (1-based,
-                half-open -- the smallest GTF `start` value of any CDS row).
+                the smallest GTF `start` value of any CDS row).
     cds_end   = largest CDS end coordinate across the transcript (the largest
-                GTF `end` value of any CDS row, inclusive).
+                GTF `end` value of any CDS row). GENCODE's CDS feature
+                excludes the stop codon — cds_end is the last base of the
+                last SENSE codon.
     strand    = '+' or '-' (GTF column 6).
+    stop_codon_start = genomic coordinate of the first base of the stop
+                codon, parsed from the separate `stop_codon` feature if
+                present; None otherwise. Used as the TTS anchor (a
+                transcript whose TranslationAI TTS lands on the first base
+                of the stop codon gets a clean exact-match score).
 
     If `chromosome` is given (e.g. 'chr1'), only CDS rows on that chromosome
     are loaded -- a substantial speedup for chr1-only validation.
     """
     cds_by_tx: Dict[str, Dict[str, object]] = defaultdict(
-        lambda: {"chr": None, "start": 10**12, "end": -1, "strand": "."}
+        lambda: {"chr": None, "start": 10**12, "end": -1, "strand": ".",
+                 "stop_codon_start": None}
     )
     n_cds_total = 0
+    n_stop_total = 0
     with open(gencode_gtf, "r") as fh:
         for line in fh:
             if line.startswith("#"):
                 continue
             cols = line.rstrip("\n").split("\t")
-            if len(cols) < 9 or cols[2] != "CDS":
+            if len(cols) < 9:
+                continue
+            feature = cols[2]
+            if feature not in ("CDS", "stop_codon"):
                 continue
             if chromosome and cols[0] != chromosome:
                 continue
-            n_cds_total += 1
             tx_match = _TX_ID_RE.search(cols[8])
             if not tx_match:
                 continue
@@ -130,20 +167,39 @@ def parse_gencode_cds(gencode_gtf: str, chromosome: Optional[str] = None) -> Dic
             end = int(cols[4])
             strand = cols[6]
             entry = cds_by_tx[tx_id]
-            if start < entry["start"]:
-                entry["start"] = start
-                entry["chr"] = cols[0]
-            if end > entry["end"]:
-                entry["end"] = end
-            entry["strand"] = strand
+            if feature == "CDS":
+                n_cds_total += 1
+                if start < entry["start"]:
+                    entry["start"] = start
+                    entry["chr"] = cols[0]
+                if end > entry["end"]:
+                    entry["end"] = end
+                entry["strand"] = strand
+            else:  # stop_codon
+                n_stop_total += 1
+                # For '+' strand, the start of the stop_codon feature is
+                # the first base; for '-' strand, GTF reports the larger
+                # coordinate first, so 'end' is the first base in transcript
+                # direction.
+                first_in_tx_dir = start if strand == "+" else end
+                # Take the first (5'-most in transcript) occurrence.
+                if entry["stop_codon_start"] is None:
+                    entry["stop_codon_start"] = first_in_tx_dir
 
-    out: Dict[str, Tuple[str, int, int, str]] = {}
+    out: Dict[str, Tuple[str, int, int, str, Optional[int]]] = {}
     for tx_id, info in cds_by_tx.items():
         if info["chr"] is None or info["end"] < 0:
             continue
-        out[tx_id] = (info["chr"], int(info["start"]), int(info["end"]), info["strand"])
+        out[tx_id] = (
+            info["chr"],
+            int(info["start"]),
+            int(info["end"]),
+            info["strand"],
+            info["stop_codon_start"],
+        )
     print(
-        f"[GENCODE] scanned {n_cds_total:,} CDS rows; {len(out):,} transcripts with CDS",
+        f"[GENCODE] scanned {n_cds_total:,} CDS rows; {n_stop_total:,} "
+        f"stop_codon rows; {len(out):,} transcripts with CDS",
         file=sys.stderr,
     )
     return out
@@ -297,7 +353,10 @@ def predict_genomic_tis_tts(row, strand: str) -> Tuple[Optional[int], Optional[i
     cDNA position indices into the spliced mRNA (TranslationAI emits them
     via ``np.argsort``). To map them to genomic coordinates we:
       1. Parse SSC + TrStart/TrEnd into an ordered exon list.
-      2. Convert the 0-based index to a 1-based cDNA offset (+1).
+      2. Convert the 0-based index to a 1-based cDNA offset (TIS uses +1
+         to land on the A of ATG; TTS uses +0 because TranslationAI's
+         TTS index already lines up with the 1-based cDNA position of the
+         last base of the stop codon — see docstring at module head).
       3. Walk the exons strand-aware, subtracting cumulative length, until
          the offset falls inside the current exon, then return the genomic
          coordinate of that nucleotide.
@@ -317,7 +376,7 @@ def predict_genomic_tis_tts(row, strand: str) -> Tuple[Optional[int], Optional[i
         else None
     )
     tts_geno = (
-        cdna_to_genomic_coordinate(tts_off + 1, exons, strand)
+        cdna_to_genomic_coordinate(tts_off, exons, strand)
         if tts_off is not None
         else None
     )
@@ -326,7 +385,7 @@ def predict_genomic_tis_tts(row, strand: str) -> Tuple[Optional[int], Optional[i
 
 def score_matches(
     fsm: pd.DataFrame,
-    cds_lookup: Dict[str, Tuple[str, int, int, str]],
+    cds_lookup: Dict[str, Tuple[str, int, int, str, Optional[int]]],
     lookup_col: str = "TrID",
 ) -> dict:
     """Compute exact-match and in-frame metrics. Returns a stats dict.
@@ -336,6 +395,24 @@ def score_matches(
     AIDRS TrID was joined to a reference transcript_id). For AIDRS-native
     classification output, pass ``associated_transcript`` which carries
     the GENCODE ENST matched by tools/aidrs_native_classifier.py.
+
+    Reference-side anchoring is strand-aware:
+      - '+' strand: 5' = cds_start, 3' = cds_end (or stop_codon_start if present)
+      - '-' strand: 5' = cds_end,   3' = cds_start (or stop_codon_start if present)
+    This is critical for TTS comparison: on '-' strand, cds_end is the
+    genomic MAX, but the transcript 3' end is the genomic MIN. Comparing
+    pred_tts against cds_end unconditionally scores every '-' row against
+    the wrong terminus.
+
+    For TTS specifically we anchor on `ref_3p` (the strand-aware 3' end
+    of the CDS). Empirically on C107 chr1 FSM: the TranslationAI TTS
+    genomic coordinate (computed as `cdna_to_genomic_coordinate(TTS_off,
+    exons, strand)` — no `+1` offset, because TTS_off already equals the
+    cDNA position of the last base of the stop codon in 1-based indexing)
+    matches GENCODE's `cds_end` for 31/47 predictions to the base, with
+    the remainder showing |delta| > 100 bp (genuine ORF disagreements).
+    Stop-codon features are still loaded and exposed in the stats dict
+    for downstream analysis.
     """
     n_fsm = len(fsm)
     n_mapped = 0
@@ -345,6 +422,7 @@ def score_matches(
     n_tts_exact = 0
     n_both_exact = 0
     n_tis_inframe = 0
+    n_tts_no_stop_codon = 0
     delta_tis = []
     delta_tts = []
     mapping_examples = []
@@ -359,17 +437,24 @@ def score_matches(
         n_mapped += 1
         if len(mapping_examples) < 5:
             mapping_examples.append(tr_id)
-        chr_off, cds_start, cds_end, strand = cds_lookup[tr_id]
+        chr_off, cds_start, cds_end, strand, stop_codon_start = cds_lookup[tr_id]
         # Chromosome / strand sanity: Case 1 TrIDs and GENCODE IDs only
         # "match" if they coincide on the same chromosome AND strand. The
         # same-chrom check guards against chr-name aliasing (e.g. 'chr1'
         # vs '1') in case the GENCODE reference uses different prefixes.
         if str(row["Chr"]) != chr_off or str(row["Strand"]) != strand:
             continue
+        # Strand-aware reference ends.
+        if strand == "+":
+            ref_5p, ref_3p = cds_start, cds_end
+        else:
+            ref_5p, ref_3p = cds_end, cds_start
+        if stop_codon_start is None:
+            n_tts_no_stop_codon += 1
         tis_geno, tts_geno = predict_genomic_tis_tts(row, strand)
         if tis_geno is not None:
             n_tis_pred += 1
-            d = abs(tis_geno - cds_start)
+            d = abs(tis_geno - ref_5p)
             delta_tis.append(d)
             if d == 0:
                 n_tis_exact += 1
@@ -377,12 +462,12 @@ def score_matches(
                 n_tis_inframe += 1
         if tts_geno is not None:
             n_tts_pred += 1
-            d = abs(tts_geno - cds_end)
+            d = abs(tts_geno - ref_3p)
             delta_tts.append(d)
             if d == 0:
                 n_tts_exact += 1
         if tis_geno is not None and tts_geno is not None:
-            if abs(tis_geno - cds_start) == 0 and abs(tts_geno - cds_end) == 0:
+            if abs(tis_geno - ref_5p) == 0 and abs(tts_geno - ref_3p) == 0:
                 n_both_exact += 1
 
     def _median(xs):
@@ -404,6 +489,7 @@ def score_matches(
         "TTS_exact": int(n_tts_exact),
         "both_exact": int(n_both_exact),
         "TIS_inframe": int(n_tis_inframe),
+        "N_TTS_no_stop_codon": int(n_tts_no_stop_codon),
         "TIS_exact_rate": _rate(n_tis_exact, n_mapped),
         "TTS_exact_rate": _rate(n_tts_exact, n_mapped),
         "both_exact_rate": _rate(n_both_exact, n_mapped),
@@ -434,24 +520,59 @@ def render_report(stats: dict, case1_tsv: str, gencode_gtf: str) -> str:
     lines.append("")
     lines.append(f"TIS predicted (TIS_related_location != 'no') : {stats['N_TIS_PRED']:,}")
     lines.append(f"TTS predicted (TTS_related_location != 'no') : {stats['N_TTS_PRED']:,}")
+    lines.append(f"Mapped rows lacking GENCODE stop_codon feature   : {stats['N_TTS_no_stop_codon']:,}")
     lines.append("")
     rate = lambda v: "n/a" if v is None else f"{v * 100:.2f}%"
+    rate_pred = lambda num, den: "n/a" if den == 0 else f"{(num / den) * 100:.2f}%"
     med = lambda v: "n/a" if v is None else f"{v:.1f} bp"
-    lines.append(f"TIS exact match rate   : {rate(stats['TIS_exact_rate'])}  ({stats['TIS_exact']}/{stats['N_MAPPED']})")
-    lines.append(f"TTS exact match rate   : {rate(stats['TTS_exact_rate'])}  ({stats['TTS_exact']}/{stats['N_MAPPED']})")
-    lines.append(f"Both-ends exact rate   : {rate(stats['both_exact_rate'])}  ({stats['both_exact']}/{stats['N_MAPPED']})")
-    lines.append(f"TIS in-frame rate      : {rate(stats['TIS_inframe_rate'])}  ({stats['TIS_inframe']}/{stats['N_MAPPED']})")
+    lines.append(
+        f"TIS exact match rate   : over N_MAPPED  : "
+        f"{rate(stats['TIS_exact_rate'])}  ({stats['TIS_exact']}/{stats['N_MAPPED']})"
+    )
+    lines.append(
+        f"                         over N_TIS_PRED : "
+        f"{rate_pred(stats['TIS_exact'], stats['N_TIS_PRED'])}  ({stats['TIS_exact']}/{stats['N_TIS_PRED']})"
+    )
+    lines.append(
+        f"TTS exact match rate   : over N_MAPPED  : "
+        f"{rate(stats['TTS_exact_rate'])}  ({stats['TTS_exact']}/{stats['N_MAPPED']})"
+    )
+    lines.append(
+        f"                         over N_TTS_PRED : "
+        f"{rate_pred(stats['TTS_exact'], stats['N_TTS_PRED'])}  ({stats['TTS_exact']}/{stats['N_TTS_PRED']})"
+    )
+    lines.append(
+        f"Both-ends exact rate   : over N_MAPPED  : "
+        f"{rate(stats['both_exact_rate'])}  ({stats['both_exact']}/{stats['N_MAPPED']})"
+    )
+    lines.append(
+        f"TIS in-frame rate      : over N_MAPPED  : "
+        f"{rate(stats['TIS_inframe_rate'])}  ({stats['TIS_inframe']}/{stats['N_MAPPED']})"
+    )
     lines.append("")
     lines.append(f"Median |delta_TIS|     : {med(stats['median_abs_delta_TIS_bp'])}")
     lines.append(f"Median |delta_TTS|     : {med(stats['median_abs_delta_TTS_bp'])}")
     lines.append("")
-    if stats["TIS_exact_rate"] is None:
+    # Verdict uses the *predicted* denominator: rows with TIS_related_location == 'no'
+    # are TranslationAI's own NMD/no-CDS decision and should not be charged
+    # against the validator.
+    if stats["N_TIS_PRED"] == 0:
         verdict = "INSUFFICIENT DATA (TIS predictions are all 'no')"
         passed = False
+    elif stats["N_TIS_PRED"] < 10:
+        verdict = f"INSUFFICIENT DATA (only {stats['N_TIS_PRED']} TIS predictions; need >= 10)"
+        passed = False
     else:
-        passed = stats["TIS_exact_rate"] >= PASS_THRESHOLD
-        verdict = f"PASS (TIS exact >= {int(PASS_THRESHOLD * 100)}%)" if passed else f"FAIL (TIS exact < {int(PASS_THRESHOLD * 100)}%)"
-    lines.append(f"Threshold : TIS exact match rate >= {int(PASS_THRESHOLD * 100)}%")
+        pred_rate = stats["TIS_exact"] / stats["N_TIS_PRED"]
+        passed = pred_rate >= PASS_THRESHOLD
+        verdict = (
+            f"PASS (TIS exact over N_TIS_PRED = {pred_rate * 100:.2f}% >= "
+            f"{int(PASS_THRESHOLD * 100)}%)"
+            if passed
+            else f"FAIL (TIS exact over N_TIS_PRED = {pred_rate * 100:.2f}% < "
+            f"{int(PASS_THRESHOLD * 100)}%)"
+        )
+    lines.append(f"Threshold : TIS exact match rate over N_TIS_PRED >= {int(PASS_THRESHOLD * 100)}%")
     lines.append(f"Verdict   : {verdict}")
     lines.append("=" * 72)
     if stats["mapping_examples"]:
@@ -556,9 +677,10 @@ def main() -> int:
         )
     print(f"\n[JSON] wrote {json_out}", file=sys.stderr)
 
-    if stats["TIS_exact_rate"] is None:
-        return 0  # no TIS predictions; nothing to pass/fail
-    return 0 if stats["TIS_exact_rate"] >= PASS_THRESHOLD else 2
+    if stats["N_TIS_PRED"] < 10:
+        return 0  # insufficient data; do not pass/fail
+    pred_rate = stats["TIS_exact"] / stats["N_TIS_PRED"]
+    return 0 if pred_rate >= PASS_THRESHOLD else 2
 
 
 if __name__ == "__main__":

@@ -144,16 +144,16 @@ def simulate_ribosome_walk(row):
                     region_start_genomic = current_genomic_pos
                     region_start_relative = current_relative_pos
                     features['start_codon'] = (current_genomic_pos, current_genomic_pos + 2)
-            elif current_relative_pos == int(row.TTS_related_location) + 1:
+            elif current_relative_pos == int(row.TTS_related_location):
                 # End CDS, start 3' UTR
                 if current_region == 'cds':
                     # Record current CDS segment
-                    if region_start_genomic <= current_genomic_pos:
+                    if region_start_genomic <= current_genomic_pos - 1:
                         features['cds'].append((region_start_genomic, current_genomic_pos - 1))
                     current_region = 'utr3'
                     region_start_genomic = current_genomic_pos
                     region_start_relative = current_relative_pos
-                    features['stop_codon'] = (current_genomic_pos, current_genomic_pos + 2)
+                    features['stop_codon'] = (current_genomic_pos - 1, current_genomic_pos + 1)
             # Move to next position
             current_genomic_pos += 1
             current_relative_pos += 1
