@@ -8,7 +8,9 @@ import tempfile
 
 import pandas as pd
 
-# Canonical 17-col scientific subset (hardcoded to eliminate input-ambiguity)
+# Canonical 16-col scientific subset = CORE_ASSESSMENT_COLS - {TrID, GeneID, GeneName}
+# Hardcoded to eliminate input-ambiguity and match src/aidrs_runtime/column_registry.py
+# (polyA_valid_reads removed 2026-09-06: never in any actual output)
 SCIENTIFIC_COLS = [
     "Chr", "Strand", "SSC", "TrStart", "TrEnd", "frequency",
     "Puffin_TSS_15bp", "Puffin_TSS_50bp",
@@ -16,7 +18,7 @@ SCIENTIFIC_COLS = [
     "TIS_related_location", "TTS_related_location",
     "TIS_score", "TTS_score",
     "Predict_NMD", "truncation",
-    "seq_len", "polyA_valid_reads",
+    "seq_len",
 ]
 
 

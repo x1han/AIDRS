@@ -151,7 +151,9 @@ class IsoformAnnotator:
         # legacy runs (17-col C107 100k baseline SHA a8469106...).
         from .aidrs_runtime.column_registry import resolve_assessment_columns
         _ASSESS_COLS = resolve_assessment_columns(df_result_after_quant)
-        df_result_after_quant[_ASSESS_COLS].drop_duplicates().to_csv(os.path.join(output_dir,
+        df_result_after_quant[_ASSESS_COLS].drop_duplicates(
+            subset=["Chr", "Strand", "TrStart", "TrEnd", "SSC"]
+        ).to_csv(os.path.join(output_dir,
                       'aidrs.transcript.assessment.tsv'), sep='\t', index=False)
 
 
@@ -169,7 +171,14 @@ class IsoformAnnotator:
             ['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd'],
             observed=True
         ).ngroup().astype(str)
-        df_unique = df[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'frequency', 'uniqueTr', 'TIS_related_location', 'TTS_related_location', 'Predict_NMD']].drop_duplicates()
+        # P1-3 fix: dedup on the physical-coordinate subset that uniquely
+        # determines uniqueTr (groupby ngroup above). The other columns
+        # (frequency, TIS_*, TTS_*, Predict_NMD) may legitimately differ for
+        # the same physical transcript; full-row dedup would silently hide
+        # annotation disagreement.
+        df_unique = df[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'frequency', 'uniqueTr', 'TIS_related_location', 'TTS_related_location', 'Predict_NMD']].drop_duplicates(
+            subset=['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']
+        )
         # 3.2 Cluster to get Group
         gene_clustering = GeneClustering(num_processes=num_processes)
         df_unique = gene_clustering.cluster(df_unique)
@@ -259,6 +268,10 @@ class IsoformAnnotator:
                 if ref_df.empty and query_df.empty:
                     return pd.DataFrame()
                 elif ref_df.empty:
+                    # P1-3 audit: query_df comes from _map_query_to_ref which
+                    # assigns TrID/GeneID/GeneName by row without scoring or
+                    # sorting. Dedup intent is defensive (drop any inadvertent
+                    # row duplication), NOT keep-best-match — so leave as-is.
                     return query_df.drop_duplicates()
                 elif query_df.empty:
                     # Update reference data with TSS/TES flags

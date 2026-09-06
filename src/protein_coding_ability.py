@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
 from Bio import SeqIO
@@ -11,6 +11,7 @@ from pyfaidx import Fasta
 import os
 import shutil
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 from functools import partial
@@ -19,6 +20,7 @@ from functools import partial
 # keras models once and serves all sequences; orf_predict_by_translationai
 # no longer spawns one subprocess per (Chr, Strand).
 from .aidrs_runtime.translationai_runner import TranslationAIRunner
+from .aidrs_runtime.concurrency import drain_futures_loud, get_process_pool
 
 class TranslationAI_ORF:
     def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=8):
@@ -191,7 +193,7 @@ class TranslationAI_ORF:
                 "TranslationAI runner not initialised; F3b requires an "
                 "in-process TranslationAIRunner."
             )
-        runner.predict_fasta(fasta_out_path, threshold_str="0.5,0.5", worker_id=worker_id)
+        runner.predict_fasta(fasta_out_path, threshold_str="0.5,0.5")
 
     def orf_predict_by_translationai(self, df):
         # P7 fanout: distribute (Chr, Strand) groups across worker processes
@@ -243,22 +245,25 @@ class TranslationAI_ORF:
         # across processes" constraint and risk CUDA / BLAS re-init races).
         ctx = mp.get_context("spawn")
         try:
-            with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as executor:
+            with get_process_pool(num_workers=num_workers, mp_context=ctx) as executor:
                 futures = [
                     executor.submit(TranslationAI_ORF._run_translationai_worker, task)
                     for task in tasks
                 ]
-                # as_completed drains in finish-order so a misbehaving worker
-                # surfaces its exception early instead of lingering at the
-                # back of the queue. future.result() re-raises any worker
-                # exception; we swallow per-future so the main loop keeps
-                # detecting the BrokenProcessPool below — which is the hard
-                # backstop for "at least one worker died".
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception:
-                        pass
+                # Fail-loud: aggregate ALL worker exceptions (no silent swallow)
+                # and post-condition rglob to catch zero-output silent path.
+                drain_futures_loud(futures, stage_name="2.4 TranslationAI")
+
+                # Block on silent zero-output path: workers exit 0 but produce
+                # zero _predORFs_*.txt files (e.g., empty model loading).
+                pred_files = list(Path(fanout_root).rglob("*_predORFs_0.5_0.5.txt"))
+                if len(df_groups) > 0 and not pred_files:
+                    raise RuntimeError(
+                        f"[FATAL] TranslationAI completed with exit code 0, but "
+                        f"produced ZERO _predORFs_0.5_0.5.txt files under "
+                        f"{fanout_root}! This indicates silent failure during "
+                        f"inference or empty model loading."
+                    )
         except BrokenProcessPool as e:
             raise RuntimeError(
                 f"TranslationAI worker pool broken: {e}"
@@ -504,8 +509,27 @@ class TranslationAI_ORF:
 
                 tss_col = 'TrStart' if Strand == '+' else 'TrEnd'
 
+                # F-008 fix: drop TranslationAI result columns from df_group
+                # BEFORE merge. df_group enters this stage with TIS/TTS
+                # columns pre-populated with the 'no' sentinel (see the
+                # default-fill loop at the end of this function). If left
+                # in place, the merge on Chr/Strand/TrStart/SSC/TrEnd would
+                # produce pandas _x/_y suffix columns for TIS/TTS and the
+                # downstream `if col not in df.columns` check would then
+                # create a fresh 'no'-filled TIS_related_location column,
+                # silently discarding every TranslationAI prediction.
+                # Dropping here lets translationai_subset's values land in
+                # clean column names so check_nmd at the end sees real TIS/TTS.
+                _tai_result_cols = [
+                    'TIS_related_location', 'TTS_related_location',
+                    'TIS_score', 'TTS_score',
+                ]
+                df_group = df_group.drop(
+                    columns=[c for c in _tai_result_cols if c in df_group.columns]
+                )
+
                 translationai_subset = meriged_translationai_res[
-                    (meriged_translationai_res['Chr'] == Chrom) & 
+                    (meriged_translationai_res['Chr'] == Chrom) &
                     (meriged_translationai_res['Strand'] == Strand)
                 ]
 

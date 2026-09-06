@@ -22,14 +22,19 @@ _ASSESSMENT_CANDIDATES = [
     "transcript.assessment.tsv",
 ]
 
-# 17-col scientific SHA schema (from tools/compare_factorial_cases.py)
+# Canonical 16-col scientific SHA schema = CORE_ASSESSMENT_COLS - {TrID, GeneID, GeneName}
+# Matches src/aidrs_runtime/column_registry.py CORE_ASSESSMENT_COLS exactly.
+# Previously this list was a pre-F-008 v0.3 schema (predict_NMD lowercase,
+# category/junction/Group SQANTI3 cols, polyA_mode, rt_switching_flag) —
+# replaced 2026-09-06 to align with current 19-col CORE output.
 SCIENTIFIC_COLS = [
-    'Chr', 'Strand', 'TrStart', 'TrEnd', 'SSC',
-    'frequency', 'polyA_frac', 'Puffin_TSS_15bp',
-    'category', 'junction', 'predict_NMD',
-    'seq_len', 'Group', 'Puffin_TSS_50bp',
-    'polyA_valid_reads', 'polyA_mode',
-    'rt_switching_flag',
+    "Chr", "Strand", "SSC", "TrStart", "TrEnd", "frequency",
+    "Puffin_TSS_15bp", "Puffin_TSS_50bp",
+    "polyA_frac",
+    "TIS_related_location", "TTS_related_location",
+    "TIS_score", "TTS_score",
+    "Predict_NMD", "truncation",
+    "seq_len",
 ]
 
 

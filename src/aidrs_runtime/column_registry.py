@@ -67,3 +67,30 @@ def resolve_assessment_columns(df) -> List[str]:
         if c in df.columns and c not in cols:
             cols.append(c)
     return cols
+
+
+def validate_canonical_schema(df) -> List[str]:
+    """Fail-loud schema validator for the CORE assessment columns.
+
+    This function intentionally raises RuntimeError on any missing
+    CORE column rather than auto-padded fabrication. Auto-padding
+    missing columns with empty/NA values would silently manufacture
+    a downstream-looking TSV whose contents are not backed by any
+    upstream stage computation. Because the assessment TSV is the
+    final, user-facing artifact and the published C107 100k baseline
+    SHA is anchored to its 19 CORE columns, a missing CORE column is
+    a stage pipeline bug -- it must be diagnosed and fixed at its
+    source, not papered over here.
+
+    Returns the list of CORE_ASSESSMENT_COLS (in declared order)
+    when validation succeeds, so callers can chain directly:
+        cols = validate_canonical_schema(df)
+        df[cols].to_csv(...)
+    """
+    missing = [c for c in CORE_ASSESSMENT_COLS if c not in df.columns]
+    if missing:
+        raise RuntimeError(
+            "[SCHEMA DRIFT] Missing CORE assessment columns: " + str(missing) +
+            ". This indicates a stage pipeline bug. Do NOT auto-pad (would fabricate data)."
+        )
+    return list(CORE_ASSESSMENT_COLS)
