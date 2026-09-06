@@ -5,10 +5,6 @@ new stages can opt-in additional columns without requiring
 generate_reports.py to be edited. Future stage columns MUST be added to
 OPTIONAL_ASSESSMENT_COLS (or a successor list) to participate in the
 assessment TSV -- they will NOT appear otherwise.
-
-P0-C: introduced after Stage 2.7 rt_switching_flag/score were silently
-dropped because generate_reports.save_results hardcoded the column
-list (see _ASSESS_COLS site in src/generate_reports.py).
 """
 from typing import List
 
@@ -60,9 +56,6 @@ SCIENTIFIC_COLS: List[str] = [
 # be added here so future stages do not need to touch
 # generate_reports.py.
 OPTIONAL_ASSESSMENT_COLS: List[str] = [
-    # Stage 2.7: RT-switching microhomology detection.
-    "rt_switching_score",
-    "rt_switching_flag",
     # Future examples (commented out until adopted):
     # "polyA_mode",
     # "category",
