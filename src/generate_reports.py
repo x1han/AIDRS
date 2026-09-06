@@ -77,7 +77,7 @@ class IsoformAnnotator:
                 )
                 
                 # Intersect matrices with model
-                quantification_matrices, filtered_annotated_df, df_quant = quantifier.intersect_matrices_with_model(
+                quantification_matrices, filtered_annotated_df = quantifier.intersect_matrices_with_model(
                     quantification_matrices, annotated_df
                 )
                 
@@ -263,20 +263,6 @@ class IsoformAnnotator:
                 # Build reference dictionary and map query to reference
                 ref_dict = self._build_ref_dict(ref_df)
                 query_df = self._map_query_to_ref(query_df, ref_dict)
-                # Combine results
-                # Handle case where either ref_df or query_df is empty
-                if ref_df.empty and query_df.empty:
-                    return pd.DataFrame()
-                elif ref_df.empty:
-                    # P1-3 audit: query_df comes from _map_query_to_ref which
-                    # assigns TrID/GeneID/GeneName by row without scoring or
-                    # sorting. Dedup intent is defensive (drop any inadvertent
-                    # row duplication), NOT keep-best-match — so leave as-is.
-                    return query_df.drop_duplicates()
-                elif query_df.empty:
-                    # Update reference data with TSS/TES flags
-                    self._update_ref_with_flags(ref_df)
-                    return ref_df.drop_duplicates()
                 result_df = pd.concat([ref_df, query_df], ignore_index=True)
                 return result_df.drop_duplicates()
             elif ref_df.empty:   # All novel
@@ -333,105 +319,6 @@ class IsoformAnnotator:
             ref_df.at[idx, 'TrStart_ref'] = q_trs
             ref_df.at[idx, 'TrEnd_ref'] = q_tre
 
-    def _map_ref_term(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Process transcript mapping by finding the most similar transcript based on range distance.
-        Args:
-            df: DataFrame containing transcript reference data with columns:
-                        TrID, TrStart_ref, TrEnd_ref, uniqueTr, TrStart, TrEnd
-        Returns:
-            Modified DataFrame with updated TrStart_ref and TrEnd_ref values based on best match
-        """
-        def calculate_range_distance(ref_range, term_range):
-            """Calculate the sum of absolute differences between two ranges."""
-            return sum(abs(a - b) for a, b in zip(ref_range, term_range))
-
-        def find_best_mapping(term_map_dict, terminal_tolerance):
-            """Find the key with minimum value in the mapping dictionary."""
-            if not term_map_dict:
-                return None
-            min_key = min(term_map_dict, key=term_map_dict.get)
-            min_value = term_map_dict[min_key]
-            return min_key if min_value < (terminal_tolerance * 3) else None  # Using 3x terminal_tolerance instead of hardcoded 150
-        # Create a copy to avoid modifying original dataframe
-        result_df = df.copy()
-        # Process each unique transcript ID
-        for trans in result_df.TrID.unique():
-            # Filter data for current transcript
-            mask = result_df.TrID == trans
-            current_trans_df = result_df[mask]
-            # Extract reference range
-            ref_start = current_trans_df.TrStart_ref.iloc[0]
-            ref_end = current_trans_df.TrEnd_ref.iloc[0]
-            ref_range = (ref_start, ref_end)
-            # Build term dictionary mapping uniqueTr to (TrStart, TrEnd)
-            term_dict = {}
-            for untr in current_trans_df.uniqueTr.unique():
-                untr_mask = (result_df.TrID == trans) & (result_df.uniqueTr == untr)
-                start_val = int(result_df.loc[untr_mask, 'TrStart'].iloc[0])
-                end_val = int(result_df.loc[untr_mask, 'TrEnd'].iloc[0])
-                term_dict[untr] = (start_val, end_val)
-            # Calculate mapping distances
-            term_map_dict = {}
-            for untr, term_range in term_dict.items():
-                distance = calculate_range_distance(ref_range, term_range)
-                term_map_dict[untr] = distance
-            # Find best mapping if minimum distance is less than threshold
-            best_match = find_best_mapping(term_map_dict, self.terminal_tolerance)
-            if best_match is not None:
-                # Update map_uniqueTr column
-                result_df.loc[mask, 'map_uniqueTr'] = best_match
-                # Update reference range with matched transcript's start and end
-                best_start, best_end = term_dict[best_match]
-                result_df.loc[mask, 'TrStart_ref'] = best_start
-                result_df.loc[mask, 'TrEnd_ref'] = best_end
-            else:
-                # Set to None if no suitable match found
-                result_df.loc[mask, 'map_uniqueTr'] = None        # Process merging of TrID for duplicate map_uniqueTr values
-        def merge_duplicate_transcripts(df):
-            """Merge rows with the same map_uniqueTr by combining TrID values."""
-            df_result = df.copy()
-            for map_tr in df_result['map_uniqueTr'].dropna().unique():
-                # Find all rows with the same map_uniqueTr
-                mask = df_result['map_uniqueTr'] == map_tr
-                matching_rows = df_result[mask]
-                if len(matching_rows) > 1:
-                    # Get unique TrID values and join them with '_'
-                    unique_trids = matching_rows['TrID'].unique()
-                    combined_trid = '_'.join(unique_trids)
-                    # Update TrID for all matching rows
-                    df_result.loc[mask, 'TrID'] = combined_trid
-            return df_result
-
-        def filter_unmapped_transcripts(df):
-            df_result = df.copy()
-
-            for uni_tr in df_result['uniqueTr'].dropna().unique():
-                mask = df_result['uniqueTr'] == uni_tr
-                matching_rows = df_result[mask]
-
-                if len(matching_rows) > 1:
-                    # 1) Prefer mapped transcripts
-                    mapped_idx = matching_rows['map_uniqueTr'].notna()
-                    if mapped_idx.any():
-                        keeper = matching_rows.loc[mapped_idx].index[0]
-                        df_result.drop(matching_rows.index.difference([keeper]), inplace=True)
-                        continue
-
-                    # 2) All unmapped: keep first row, rebuild TrID
-                    keeper = matching_rows.index[0]
-                    df_result.loc[keeper, 'TrID'] = f"{matching_rows['GeneID'].iat[0]}_Novel{uni_tr}"
-                    df_result.loc[keeper, 'TrStart_ref'] = matching_rows['TrStart'].iat[0]
-                    df_result.loc[keeper, 'TrEnd_ref'] = matching_rows['TrEnd'].iat[0]
-                    df_result.drop(matching_rows.index.difference([keeper]), inplace=True)
-
-            return df_result
-
-        # Apply the merging logic
-        result_df = merge_duplicate_transcripts(result_df)
-        result_df = filter_unmapped_transcripts(result_df)
-        return result_df.drop(columns = ['map_uniqueTr']).drop_duplicates()
-    
     def _transcript_1to1_processor(self, uni_tr_mappings):
         # Copy to avoid warnings
         uni_tr_mappings = uni_tr_mappings.copy()

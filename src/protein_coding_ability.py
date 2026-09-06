@@ -32,10 +32,6 @@ class TranslationAI_ORF:
         self.tmp_path = tmp_path
         self.translationai_score_threshold = translationai_score_threshold
         self.num_processes = num_processes
-        # F3b: instantiate the in-process runner ONCE. Loading the 5 .h5
-        # models here (instead of once-per-(Chr, Strand) subprocess) is the
-        # whole point of F3b.
-        self._runner = TranslationAIRunner()
 
     @staticmethod
     def fetch_exon(row):

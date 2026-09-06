@@ -56,11 +56,15 @@ def self_test(baseline_tsv, columns):
     with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False) as f:
         roundtrip_b = f.name
     df_b = pd.read_csv(roundtrip_a, sep="\t")
-    if len(df_b) >= 5 and "frequency" in df_b.columns:
-        df_b.loc[4, "frequency"] = df_b.loc[4, "frequency"] + 1  # row 5 (0-indexed 4)
-        df_b.to_csv(roundtrip_b, sep="\t", index=False)
-    else:
-        shutil.copyfile(roundtrip_a, roundtrip_b)
+    if len(df_b) < 5 or "frequency" not in df_b.columns:
+        print(
+            "self-test: cannot mutate (need >=5 rows and 'frequency' column)",
+            file=sys.stderr,
+        )
+        return False
+    df_b["frequency"] = pd.to_numeric(df_b["frequency"], errors="coerce")
+    df_b.loc[4, "frequency"] = (df_b.loc[4, "frequency"] or 0) + 1
+    df_b.to_csv(roundtrip_b, sep="\t", index=False)
 
     h1, err1 = hash_columns(roundtrip_b, columns)
     if err1 is not None:

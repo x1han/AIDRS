@@ -36,9 +36,7 @@ def get_process_pool(num_workers, mp_context=None):
     """Factory for a ProcessPoolExecutor with the death-pact initializer.
 
     Every worker process is set up with PR_SET_PDEATHSIG=SIGKILL so that
-    orphan workers terminate immediately if the parent process dies,
-    instead of being reparented to init/1 and continuing to consume CPU
-    (observed 128% CPU two days after the parent was killed).
+    orphan workers terminate immediately when the parent dies.
     """
     kwargs = {"max_workers": num_workers, "initializer": _worker_death_pact}
     if mp_context is not None:
@@ -78,7 +76,8 @@ def drain_futures_loud(futures, stage_name, allow_partial=False):
         if exc is not None:
             failed_tasks.append(exc)
             logger.critical(
-                f"[{stage_name} WORKER FAILED]: {exc}",
+                "[%s WORKER FAILED]: %s",
+                stage_name, exc,
                 exc_info=exc,
             )
         else:
@@ -87,8 +86,7 @@ def drain_futures_loud(futures, stage_name, allow_partial=False):
     if failed_tasks and not allow_partial:
         raise RuntimeError(
             f"[{stage_name} FATAL] {len(failed_tasks)}/{len(futures)} workers "
-            f"crashed! Aborting to prevent silent chromosome-level data loss. "
-            f"First error: {failed_tasks[0]!r}. See logs above for full traceback list."
-        )
+            f"crashed! Aborting to prevent silent chromosome-level data loss."
+        ) from failed_tasks[0]
 
     return results
