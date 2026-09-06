@@ -63,9 +63,15 @@ class TruncationProcessor:
             np.inf
         )
         df['group_freq'] = df.groupby(['Chr', 'Strand', 'Group'],observed=True)['frequency'].transform('sum')
+        # BUGFIX 2026-09-06: group_freq_ratio was double-counting self.
+        # group_freq already includes self (transform('sum') over the
+        # full group), so the original `self / (self + group_freq)`
+        # formula understates the row's share whenever self > 0.
+        # Correct formula: `self / group_freq` (= self / (self + others))
+        # gives the row's actual fraction of total group support.
         df['group_freq_ratio'] = np.where(
             df['truncation_source'] != 'full',
-            df['frequency'] / (df['frequency'] + df['group_freq']),
+            df['frequency'] / df['group_freq'],
             np.inf
         )
 
