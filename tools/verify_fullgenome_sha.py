@@ -4,37 +4,30 @@
 Usage:
     python tools/verify_fullgenome_sha.py /datf/hanxi/test/AIDRS/output_fullgenome_2026-09-05/
 
-Computes the 17-col scientific SHA on the assessment.tsv file and reports:
+Computes the 16-col scientific SHA on the assessment.tsv file and reports:
 - Total record count (Pipeline Completion Invariant: >= 1000)
-- 17-col SHA
+- 16-col SHA
 - Stage 2.7 rt_switching_flag=True count and percentage (if column present)
 """
 import sys
 import hashlib
+import os
 from pathlib import Path
 
+# Allow standalone invocation: tools/*.py scripts must be runnable as
+# `python tools/verify_fullgenome_sha.py ...` without the caller setting
+# PYTHONPATH.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)))
+
 import pandas as pd
+
+from src.aidrs_runtime.column_registry import SCIENTIFIC_COLS
 
 OUTPUT_DIR = Path(sys.argv[1] if len(sys.argv) > 1 else "/datf/hanxi/test/AIDRS/output_fullgenome_2026-09-05/")
 _ASSESSMENT_CANDIDATES = [
     "aidrs.transcript.assessment.tsv",
     "assessment.tsv",
     "transcript.assessment.tsv",
-]
-
-# Canonical 16-col scientific SHA schema = CORE_ASSESSMENT_COLS - {TrID, GeneID, GeneName}
-# Matches src/aidrs_runtime/column_registry.py CORE_ASSESSMENT_COLS exactly.
-# Previously this list was a pre-F-008 v0.3 schema (predict_NMD lowercase,
-# category/junction/Group SQANTI3 cols, polyA_mode, rt_switching_flag) —
-# replaced 2026-09-06 to align with current 19-col CORE output.
-SCIENTIFIC_COLS = [
-    "Chr", "Strand", "SSC", "TrStart", "TrEnd", "frequency",
-    "Puffin_TSS_15bp", "Puffin_TSS_50bp",
-    "polyA_frac",
-    "TIS_related_location", "TTS_related_location",
-    "TIS_score", "TTS_score",
-    "Predict_NMD", "truncation",
-    "seq_len",
 ]
 
 
@@ -57,10 +50,10 @@ def main():
         print(f"ERROR: row count {len(df)} below 1000 invariant", file=sys.stderr)
         sys.exit(2)
 
-    # Compute 17-col SHA on columns that exist
+    # Compute 16-col SHA on columns that exist
     cols_present = [c for c in SCIENTIFIC_COLS if c in df.columns]
     cols_missing = [c for c in SCIENTIFIC_COLS if c not in df.columns]
-    print(f"[INFO] Scientific columns present: {len(cols_present)}/17")
+    print(f"[INFO] Scientific columns present: {len(cols_present)}/{len(SCIENTIFIC_COLS)}")
     if cols_missing:
         print(f"[INFO] Missing (skipped in SHA): {cols_missing}")
 

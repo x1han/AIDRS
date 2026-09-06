@@ -39,6 +39,22 @@ CORE_ASSESSMENT_COLS: List[str] = [
 ]
 
 
+# Canonical 16-col scientific subset = CORE_ASSESSMENT_COLS - {TrID, GeneID, GeneName}.
+# Single source of truth for byte-identity SHA computation across tools
+# (diff_sha.py, extract_scientific_sha.py, verify_fullgenome_sha.py,
+# compare_mouse_s1_factorial.py). Tools import this constant; they
+# must not redefine it locally.
+SCIENTIFIC_COLS: List[str] = [
+    "Chr", "Strand", "SSC", "TrStart", "TrEnd", "frequency",
+    "Puffin_TSS_15bp", "Puffin_TSS_50bp",
+    "polyA_frac",
+    "TIS_related_location", "TTS_related_location",
+    "TIS_score", "TTS_score",
+    "Predict_NMD", "truncation",
+    "seq_len",
+]
+
+
 # Stage opt-in columns. Order matters: columns are appended to CORE in
 # this order when they exist on the dataframe. New stage columns must
 # be added here so future stages do not need to touch

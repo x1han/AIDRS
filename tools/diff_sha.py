@@ -2,24 +2,18 @@
 """Column-subset SHA256 verifier for AIDRS byte-identity regression testing."""
 import argparse
 import hashlib
+import os
 import shutil
 import sys
 import tempfile
 
+# Allow standalone invocation: tools/*.py scripts must be runnable as
+# `python tools/diff_sha.py ...` without the caller setting PYTHONPATH.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)))
+
 import pandas as pd
 
-# Canonical 16-col scientific subset = CORE_ASSESSMENT_COLS - {TrID, GeneID, GeneName}
-# Hardcoded to eliminate input-ambiguity and match src/aidrs_runtime/column_registry.py
-# (polyA_valid_reads removed 2026-09-06: never in any actual output)
-SCIENTIFIC_COLS = [
-    "Chr", "Strand", "SSC", "TrStart", "TrEnd", "frequency",
-    "Puffin_TSS_15bp", "Puffin_TSS_50bp",
-    "polyA_frac",
-    "TIS_related_location", "TTS_related_location",
-    "TIS_score", "TTS_score",
-    "Predict_NMD", "truncation",
-    "seq_len",
-]
+from src.aidrs_runtime.column_registry import SCIENTIFIC_COLS
 
 
 def hash_columns(tsv_path, columns):
@@ -88,12 +82,12 @@ def main():
                         help="Baseline name to label output. legacy=H_0, current=H_1. "
                              "Column-subset SHA is identical for both; this only "
                              "affects output labeling.")
-    parser.add_argument('--scientific', action='store_true', help='Use 17-col scientific subset (no TrID/GeneID/GeneName)')
+    parser.add_argument('--scientific', action='store_true', help='Use 16-col scientific subset (no TrID/GeneID/GeneName)')
     parser.add_argument(
         "--use-scientific-cols",
         action="store_true",
         default=True,  # default ON for safety
-        help="Use canonical 17-col SCIENTIFIC_COLS (ignores positional column arg). Default True."
+        help="Use canonical 16-col SCIENTIFIC_COLS (ignores positional column arg). Default True."
     )
     parser.add_argument(
         "--no-scientific-cols",
@@ -116,14 +110,14 @@ def main():
     print(f"[baseline: {baseline_label}]")
 
     if args.scientific:
-        print("[mode: scientific (17 cols, no TrID/GeneID/GeneName)]")
+        print("[mode: scientific (16 cols, no TrID/GeneID/GeneName)]")
 
     # Decide which column list to use for SHA computation.
-    # Default is SCIENTIFIC_COLS (hardcoded 17-col subset).
+    # Default is SCIENTIFIC_COLS (imported 16-col subset).
     # --no-scientific-cols reverts to the legacy positional column argument.
     if args.use_scientific_cols and not args.no_scientific_cols:
         columns = SCIENTIFIC_COLS
-        print("Using canonical 17-col SCIENTIFIC_COLS; positional column argument ignored")
+        print("Using canonical 16-col SCIENTIFIC_COLS; positional column argument ignored")
     else:
         # legacy: use positional argument as before
         columns = cols
