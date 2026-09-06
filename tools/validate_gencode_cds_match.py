@@ -40,6 +40,12 @@ Usage:
         --case1-tsv /datf/hanxi/test/AIDRS/benchmark_chr1/case1_transAI_polyA/aidrs.transcript.assessment.tsv \
         --gencode-gtf /datf/hanxi/database/reference/GENCODE/GRCh38.p14/gencode.v47.primary_assembly.annotation.gtf
 
+    # AIDRS-native classifier output (no SQANTI3 dependency):
+    python tools/validate_gencode_cds_match.py \
+        --case1-tsv /datf/hanxi/test/AIDRS/benchmark_chr1/case1_transAI_polyA/aidrs.transcript.classified.tsv \
+        --gencode-gtf /datf/hanxi/database/reference/GENCODE/GRCh38.p14/gencode.v47.primary_assembly.annotation.gtf \
+        --category-col structural_category --lookup-col associated_transcript
+
 Exit codes:
     0  PASS (TIS exact match rate >= 70%) or no FSM rows to score
     1  invocation error (bad args, missing files)
@@ -142,27 +148,36 @@ def parse_gencode_cds(gencode_gtf: str, chromosome: Optional[str] = None) -> Dic
 # Case 1 TSV loading + FSM filter
 # ---------------------------------------------------------------------------
 
-def load_fsm_rows(case1_tsv: str) -> pd.DataFrame:
+def load_fsm_rows(
+    case1_tsv: str,
+    category_col: str = "category",
+) -> pd.DataFrame:
     """Load Case 1 TSV and return FSM rows. Fails loudly if no category col
-    or no FSM rows exist."""
+    or no FSM rows exist.
+
+    `category_col` accepts either the SQANTI3-style ``category`` (default) or
+    the AIDRS-native ``structural_category`` produced by
+    tools/aidrs_native_classifier.py.
+    """
     df = pd.read_csv(case1_tsv, sep="\t")
     print(f"[Case1] loaded {len(df):,} rows from {case1_tsv}", file=sys.stderr)
     print(f"[Case1] columns: {list(df.columns)}", file=sys.stderr)
-    if "category" not in df.columns:
+    if category_col not in df.columns:
         sys.stderr.write(
-            "[FATAL] Case 1 TSV has no 'category' column. FSM filtering requires\n"
-            "        SQANTI3 classification upstream (Case 1 output does not\n"
-            "        carry SQANTI3 attributes). Run SQANTI3 on Case 1 first,\n"
-            "        then re-run with the resulting classification joined on TrID.\n"
+            f"[FATAL] Case 1 TSV has no '{category_col}' column. FSM filtering\n"
+            f"        requires a classification column. Pass --category-col to\n"
+            f"        specify 'category' (SQANTI3) or 'structural_category'\n"
+            f"        (AIDRS-native).\n"
         )
         sys.exit(3)
-    fsm = df[df["category"] == "FSM"].copy()
+    fsm = df[df[category_col] == "FSM"].copy()
     print(f"[Case1] FSM rows: {len(fsm):,}", file=sys.stderr)
     if len(fsm) == 0:
         sys.stderr.write(
-            "[FATAL] Case 1 TSV has zero FSM rows. Either Case 1 was not\n"
-            "        SQANTI3-classified, or every transcript is NIC/NNC/novel.\n"
-            "        Cannot validate TranslationAI against an empty reference set.\n"
+            f"[FATAL] Case 1 TSV has zero FSM rows in '{category_col}'. Either\n"
+            f"        the file was not classified, or every transcript is\n"
+            f"        NIC/NNC/novel. Cannot validate TranslationAI against an\n"
+            f"        empty reference set.\n"
         )
         sys.exit(3)
     return fsm
@@ -219,8 +234,19 @@ def predict_genomic_tis_tts(row, cds_start: int, cds_end: int, strand: str) -> T
     return tis_geno, tts_geno
 
 
-def score_matches(fsm: pd.DataFrame, cds_lookup: Dict[str, Tuple[str, int, int, str]]) -> dict:
-    """Compute exact-match and in-frame metrics. Returns a stats dict."""
+def score_matches(
+    fsm: pd.DataFrame,
+    cds_lookup: Dict[str, Tuple[str, int, int, str]],
+    lookup_col: str = "TrID",
+) -> dict:
+    """Compute exact-match and in-frame metrics. Returns a stats dict.
+
+    `lookup_col` is the column whose value is matched against the GENCODE
+    CDS lookup keys (ENST*). Default ``TrID`` (SQANTI3-style where the
+    AIDRS TrID was joined to a reference transcript_id). For AIDRS-native
+    classification output, pass ``associated_transcript`` which carries
+    the GENCODE ENST matched by tools/aidrs_native_classifier.py.
+    """
     n_fsm = len(fsm)
     n_mapped = 0
     n_tis_pred = 0
@@ -234,7 +260,7 @@ def score_matches(fsm: pd.DataFrame, cds_lookup: Dict[str, Tuple[str, int, int, 
     mapping_examples = []
 
     for _, row in fsm.iterrows():
-        tr_id = row.get("TrID")
+        tr_id = row.get(lookup_col)
         if pd.isna(tr_id):
             continue
         tr_id = str(tr_id)
@@ -373,6 +399,25 @@ def main() -> int:
         default=None,
         help="Optional JSON dump path. Default: tools/.out/validate_gencode_cds_match.json",
     )
+    ap.add_argument(
+        "--category-col",
+        default="category",
+        help=(
+            "Column holding the structural classification (used to filter FSM rows). "
+            "Default 'category' (SQANTI3). Use 'structural_category' for AIDRS-native "
+            "output from tools/aidrs_native_classifier.py."
+        ),
+    )
+    ap.add_argument(
+        "--lookup-col",
+        default="TrID",
+        help=(
+            "Column whose value is matched against the GENCODE CDS lookup (ENST*). "
+            "Default 'TrID' (SQANTI3-style, where TrID was joined to a reference "
+            "transcript_id). Use 'associated_transcript' for AIDRS-native output, "
+            "which carries the GENCODE ENST matched by tools/aidrs_native_classifier.py."
+        ),
+    )
     args = ap.parse_args()
 
     for p in (args.case1_tsv, args.gencode_gtf):
@@ -385,17 +430,17 @@ def main() -> int:
         sys.stderr.write("[FATAL] GENCODE GTF produced zero CDS transcripts -- abort.\n")
         return 1
 
-    fsm = load_fsm_rows(args.case1_tsv)
-    stats = score_matches(fsm, cds_lookup)
+    fsm = load_fsm_rows(args.case1_tsv, category_col=args.category_col)
+    stats = score_matches(fsm, cds_lookup, lookup_col=args.lookup_col)
 
     if stats["N_MAPPED"] == 0:
         sys.stderr.write(
-            "[FATAL] zero FSM TrIDs matched the GENCODE CDS lookup. The Case 1\n"
-            "        TrID namespace (e.g. NovelGeneN_NovelTrM) does not overlap\n"
-            "        GENCODE's ENST* transcript IDs. Either (a) join Case 1 with\n"
-            "        a SQANTI3 classification that retains the reference\n"
-            "        transcript_id, or (b) feed in a different reference set\n"
-            "        whose IDs match Case 1.\n"
+            f"[FATAL] zero FSM rows matched the GENCODE CDS lookup via "
+            f"'{args.lookup_col}'. Either (a) pass --lookup-col "
+            f"associated_transcript for AIDRS-native output, or (b) join Case 1 "
+            f"with a SQANTI3 classification that retains the reference "
+            f"transcript_id, or (c) feed in a different reference set whose IDs "
+            f"match Case 1.\n"
         )
         return 3
 
