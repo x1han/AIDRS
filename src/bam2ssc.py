@@ -40,6 +40,14 @@ def count_single_bam(bam, threads_per_bam):
         count = int(result.stdout.strip())
         return bam, count
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        if not os.path.exists(bai_file):
+            raise RuntimeError(
+                f"Cannot count reads in {bam}: neither a .bai index nor the samtools "
+                f"binary is available (samtools attempt failed: {e}). "
+                f"pysam.AlignmentFile.count() requires a .bai index. "
+                f"Either install samtools or create a .bai index for {bam} "
+                f"(e.g. `samtools index {bam}`)."
+            )
         logger.warning(f'samtools view -c failed for {bam}: {e}, falling back to pysam')
         with pysam.AlignmentFile(bam, 'rb', threads=threads_per_bam) as bf:
             count = bf.count()
