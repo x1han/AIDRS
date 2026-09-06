@@ -182,7 +182,7 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
                 if len(positions) > 2:
                     str_pos = '-'.join(map(str, positions[1:-1]))
                 else:
-                    str_pos = 'NA'            
+                    str_pos = 'NA'
 
             polya_len = next((t[1] for t in read.tags if t[0] == 'pt'), None)
             # Dorado pt:i sentinel semantics:
@@ -238,6 +238,222 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
 
     return out1_tmp, out2_tmp, bam
 
+
+def get_chrom_offsets(bam):
+    """Pre-scan BAM once to find chromosome boundaries in iteration order.
+
+    Returns (boundaries, total_reads):
+      boundaries: list of (chrom, first_idx, last_idx) where indices are
+        0-based read positions in the full BAM iteration (chrom is None
+        for the trailing unmapped-tail segment, if any).
+      total_reads: total number of records seen.
+
+    For position-sorted BAMs (typical RNA-seq), this gives stable
+    chromosome boundaries that map cleanly to (start_read, end_read)
+    chunk ranges.
+    """
+    boundaries = []
+    current_chrom = None
+    current_start = 0
+    total_reads = 0
+    with pysam.AlignmentFile(bam, 'rb', threads=1) as bf:
+        for i, read in enumerate(bf):
+            total_reads = i + 1
+            chrom = read.reference_name  # None for unmapped reads
+            if chrom != current_chrom:
+                if current_chrom is not None:
+                    boundaries.append((current_chrom, current_start, i - 1))
+                current_chrom = chrom
+                current_start = i
+        if current_chrom is not None or total_reads > 0:
+            # Close the trailing segment (may have chrom=None for unmapped tail).
+            boundaries.append((current_chrom, current_start, total_reads - 1))
+    return boundaries, total_reads
+
+
+def chunk_to_chrom_jobs(start_read, end_read, chrom_offsets):
+    """Convert (start_read, end_read) read-range to per-chromosome fetch jobs.
+
+    Returns list of (chrom, start_in_chrom, end_in_chrom) where
+    start_in_chrom / end_in_chrom are half-open read offsets within
+    the chromosome's bf.fetch() iteration (0-based). For a position-
+    sorted BAM, processing these jobs in order produces the same
+    per-chunk read sequence as the legacy O(N) skip approach.
+    """
+    jobs = []
+    for chrom, first_idx, last_idx in chrom_offsets:
+        if end_read <= first_idx:
+            break
+        if start_read > last_idx:
+            continue
+        # Map global read offsets to per-chromosome offsets (0-based, half-open).
+        chrom_start = max(0, start_read - first_idx)
+        chrom_end = min(last_idx + 1 - first_idx, end_read - first_idx)
+        if chrom_end > chrom_start:
+            jobs.append((chrom, chrom_start, chrom_end))
+    return jobs
+
+
+def process_bam_chunk_fast(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, chrom_jobs):
+    """P1: O(work) per-chunk worker using .bai-based bf.fetch() iteration.
+
+    Replaces the legacy O(N) skip-with-offset reader in process_bam_chunk.
+    Requires that the .bai index exists for the BAM (caller must verify).
+
+    chrom_jobs: list of (chrom, start_in_chrom, end_in_chrom) tuples
+      in BAM iteration order, produced by chunk_to_chrom_jobs().
+
+    Reads within each chromosome job are iterated in bf.fetch() order,
+    which matches the legacy O(N) iteration order for position-sorted
+    BAMs (the expected input). This preserves byte-identity of the
+    per-chunk output for the typical RNA-seq use case.
+
+    Unmapped reads (chrom is None) are skipped here, matching the legacy
+    `if read.is_unmapped: continue` behavior in process_bam_chunk.
+    """
+    bam_basename = os.path.splitext(os.path.basename(bam))[0]
+    out1_tmp = os.path.join(temp_dir, f'out1_{bam_basename}_chunk_{chunk_idx}.txt')
+    out2_tmp = os.path.join(temp_dir, f'out2_{bam_basename}_chunk_{chunk_idx}.txt')
+
+    id_count = defaultdict(int)
+    ec = defaultdict(int)
+    seq_cache = {}
+    processed_lines = 0
+    written_out1 = 0
+    written_out2 = 0
+
+    with open(out1_tmp, 'w') as out1_fh, pysam.AlignmentFile(bam, 'rb', threads=threads) as bf, pysam.FastaFile(fasta_file) as fa:
+        for chrom, chrom_start, chrom_end in chrom_jobs:
+            if chrom is None:
+                # Unmapped tail -- bf.fetch() cannot return these. Skip,
+                # matching the legacy `is_unmapped: continue` behavior.
+                continue
+            try:
+                chrom_iter = bf.fetch(chrom)
+            except (ValueError, KeyError):
+                # Chromosome listed in offsets but absent from .bai -- skip.
+                logger.warning(
+                    f"Chunk {chunk_idx}: cannot fetch chrom {chrom!r} from {bam}, skipping"
+                )
+                continue
+            for j, read in enumerate(chrom_iter):
+                if j < chrom_start:
+                    continue
+                if j >= chrom_end:
+                    break
+                if read.is_unmapped:
+                    continue
+                if read.query_sequence is None:
+                    continue
+                processed_lines += 1
+
+                astrand = '-' if read.is_reverse else '+'
+                xs = ts = None
+                error = None
+                for tag, value in read.tags:
+                    if tag == 'XS':
+                        xs = value
+                    elif tag == 'ts':
+                        ts = value
+                    elif tag == 'NM':
+                        error = value
+                if ts and not xs and ts in ('+', '-'):
+                    xs = ('+' if ts == '-' else '-') if read.is_reverse else ts
+                strand = xs or astrand
+
+                pos = read.reference_start + 1
+                cov = clip = gap = 0
+                positions = []
+                for op, length in read.cigartuples:
+                    if op in (4, 5):
+                        clip += length
+                    elif op == 1:
+                        cov += length
+                    elif op == 3:
+                        end = pos + gap - 1
+                        positions.extend([pos, end])
+                        pos = end + length + 1
+                        gap = 0
+                    elif op == 0:
+                        cov += length
+                        gap += length
+                    else:
+                        gap += length
+                end = pos + gap - 1
+                positions.extend([pos, end])
+
+                seqlen = len(read.query_sequence)
+                if error is None:
+                    logger.warning(
+                        f"Read {read.query_name}: NM tag missing, treating identity as 1.0"
+                    )
+                    identity = 1.0
+                else:
+                    identity = 1 - (error / cov) if cov else 0
+                coverage = (seqlen - clip) / seqlen if seqlen else 0
+
+                id_count[read.query_name] += 1
+                if len(positions) == 0:
+                    s1 = 'NA'
+                    e1 = 'NA'
+                    str_pos = 'NA'
+                elif len(positions) == 1:
+                    s1 = positions[0]
+                    e1 = positions[0]
+                    str_pos = 'NA'
+                else:
+                    s1 = positions[0]
+                    e1 = positions[-1]
+                    if len(positions) > 2:
+                        str_pos = '-'.join(map(str, positions[1:-1]))
+                    else:
+                        str_pos = 'NA'
+
+                polya_len = next((t[1] for t in read.tags if t[0] == 'pt'), None)
+                polya_len = max(0, int(polya_len)) if polya_len is not None else 0
+
+                out1_fh.write(f'{read.query_name}.m{id_count[read.query_name]}\t'
+                             f'{read.reference_name}\t{strand}\t{s1}\t{e1}\t{str_pos}\t'
+                             f'{identity}\t{coverage}\t{polya_len}\n')
+                written_out1 += 1
+
+                if str_pos != 'NA':
+                    key = f'{read.reference_name}\t{strand}\t{str_pos}'
+                    if key not in seq_cache:
+                        b = str_pos.split('-')
+                        ds = ''
+                        contig_len = fa.get_reference_length(read.reference_name) if read.reference_name else 0
+                        def _safe_fetch(start, end):
+                            s = max(0, min(start, contig_len))
+                            e = max(0, min(end, contig_len))
+                            if e <= s:
+                                return ''
+                            try:
+                                return fa.fetch(reference=read.reference_name, start=s, end=e)
+                            except (ValueError, KeyError):
+                                return ''
+                        if strand == '+':
+                            for i, k1 in enumerate(b):
+                                k1 = int(k1)
+                                seq = _safe_fetch(k1, k1+2) if i % 2 == 0 else _safe_fetch(k1-3, k1-1)
+                                ds += f'{seq}-' if i % 2 == 0 else f'{seq},'
+                        else:
+                            for i, k1 in enumerate(reversed(b)):
+                                k1 = int(k1)
+                                seq = _safe_fetch(k1-3, k1-1) if i % 2 == 0 else _safe_fetch(k1, k1+2)
+                                seq = str(Seq(seq).reverse_complement()) if seq else ''
+                                ds += f'{seq}-' if i % 2 == 0 else f'{seq},'
+                        ds = ds.rstrip(',')
+                        seq_cache[key] = ds
+                    ec[key] += 1
+
+    with open(out2_tmp, 'w') as out2_fh:
+        for k in ec:
+            out2_fh.write(f'{ec[k]}\t{k}\t{seq_cache[k]}\n')
+            written_out2 += 1
+
+    return out1_tmp, out2_tmp, bam
+
 def merge_single_bam(bam, files, out_dir):
     bam_basename = os.path.splitext(os.path.basename(bam))[0]
     out1 = os.path.join(out_dir, f'{bam_basename}_flnc.ssc')
@@ -285,17 +501,49 @@ def main():
     bam_lines, total_lines = get_bam_read_counts(args.bam, args.threads)
     chunk_allocations = allocate_chunks(args.bam, bam_lines, total_lines, args.threads)
 
+    # P1 perf: pre-scan BAMs with a .bai index to derive chromosome offsets
+    # so per-chunk workers can iterate via bf.fetch() (O(work)) instead of
+    # O(N) skip-with-offset (legacy). Falls back to legacy read-count
+    # chunking if .bai is unavailable -- preserves byte-identity of the
+    # legacy path.
+    bam_has_index = {bam: os.path.exists(bam + '.bai') for bam in args.bam}
+    bam_chrom_offsets = {}
+    for bam in args.bam:
+        if bam_has_index[bam]:
+            try:
+                bam_chrom_offsets[bam] = get_chrom_offsets(bam)
+            except Exception as e:
+                logger.warning(
+                    f"Pre-scan failed for {bam}: {e}; falling back to legacy O(N) skip"
+                )
+                bam_has_index[bam] = False
+
+    use_fast_path = all(bam_has_index.values()) and bam_chrom_offsets
+
     tasks = []
+    worker = process_bam_chunk_fast if use_fast_path else process_bam_chunk
     for bam, chunk_count in chunk_allocations:
         total_lines = bam_lines[bam]
         lines_per_chunk = total_lines // chunk_count + 1 if chunk_count > 1 else total_lines
         for i in range(chunk_count):
             start_read = i * lines_per_chunk
             end_read = min((i + 1) * lines_per_chunk, total_lines)
-            tasks.append((bam, args.reference, tempfile.gettempdir(), args.output, args.threads, i, start_read, end_read))
+            if use_fast_path:
+                chrom_offsets, _ = bam_chrom_offsets[bam]
+                chrom_jobs = chunk_to_chrom_jobs(start_read, end_read, chrom_offsets)
+                tasks.append((bam, args.reference, tempfile.gettempdir(), args.output,
+                              args.threads, i, chrom_jobs))
+            else:
+                tasks.append((bam, args.reference, tempfile.gettempdir(), args.output,
+                              args.threads, i, start_read, end_read))
+
+    if use_fast_path:
+        logger.info(
+            f"P1 perf: using .bai-based chromosome chunking across {len(tasks)} chunks"
+        )
 
     with mp.Pool(processes=args.threads) as pool:
-        chunk_results = pool.starmap(process_bam_chunk, tasks)
+        chunk_results = pool.starmap(worker, tasks)
 
     merge_results(chunk_results, args.reference, args.output, args.threads)
 

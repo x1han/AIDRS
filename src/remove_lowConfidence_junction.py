@@ -66,18 +66,23 @@ class SpliceConsensusFilter:
 
 
     def remove_SJ(self, df):
-        prev_length = -1
-        while len(df) != prev_length:
-            prev_length = len(df)
-            with Pool(self.num_processes) as pool:
+        # P1: Pool hoisted out of the convergence while loop. Previously the
+        # pool was recreated on every iteration (forkserver spawn + worker
+        # init dominated wall time on chr1 ~10-30s per iteration). Reusing
+        # one Pool across all iterations preserves byte-identity while
+        # eliminating per-iteration reinit cost.
+        with Pool(self.num_processes) as pool:
+            prev_length = -1
+            while len(df) != prev_length:
+                prev_length = len(df)
                 chr_groups = list(df.groupby(['Chr','Strand'], observed=True))
                 results = pool.map(self.filter_edges_forchr, chr_groups)
 
-            results = [r for r in results if not r.empty]
-            if not results:
-                break
+                results = [r for r in results if not r.empty]
+                if not results:
+                    break
 
-            df = pd.concat(results, ignore_index=True)
-            df = df[(df['remove_edges'].isna()) | (df['frequency'] >= 5)]
+                df = pd.concat(results, ignore_index=True)
+                df = df[(df['remove_edges'].isna()) | (df['frequency'] >= 5)]
 
         return df.drop(columns='remove_edges', errors='ignore')
