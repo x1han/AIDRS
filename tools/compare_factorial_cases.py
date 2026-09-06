@@ -5,7 +5,14 @@ Outputs:
   - Per-case stats: total retained, shared with baseline, gained, lost
   - Modality degradation robustness: Case 1 vs Case 2/3/4 overlap
   - Sample gained/lost model keys for biological interpretation
+  - FULL Gained/Lost lists printed (with optional --full-diff-limit cap)
+  - Row-level diff written to <bench>/diffs/<case>_vs_<baseline>.diff.tsv when --write-diff
+
+The row-level diff is the killer feature for SHA-drift debugging: instead of a
+black-box signal ("SHA differs"), developers see exactly which model_key
+coordinates were gained or lost.
 """
+import argparse
 import sys
 import os
 import json
@@ -41,12 +48,42 @@ def load_isoforms(tsv_path):
     return set(df["model_key"]), df, sha
 
 
+def write_diff(diffs_dir, base_name, case_name, base_df, case_df, gained, lost):
+    """Write row-level diff to <diffs_dir>/<case>_vs_<base>.gained.tsv / .lost.tsv."""
+    os.makedirs(diffs_dir, exist_ok=True)
+
+    def sanitize(name):
+        # Strip brackets, replace problematic filename chars with safe ASCII.
+        return (name.replace("[", "").replace("]", "")
+                    .replace(" ", "_").replace("+", "p").replace("-", "n")
+                    .replace(",", "").replace("(", "").replace(")", ""))
+
+    safe_base = sanitize(base_name)
+    safe_case = sanitize(case_name)
+    prefix = os.path.join(diffs_dir, f"{safe_case}_vs_{safe_base}")
+
+    if gained and not case_df.empty:
+        gained_df = case_df[case_df["model_key"].isin(gained)].drop(columns=["model_key"])
+        gained_df.to_csv(f"{prefix}.gained.tsv", sep="\t", index=False)
+    if lost and not base_df.empty:
+        lost_df = base_df[base_df["model_key"].isin(lost)].drop(columns=["model_key"])
+        lost_df.to_csv(f"{prefix}.lost.tsv", sep="\t", index=False)
+
+
 def main():
-    bench_dir = (
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else "/datf/hanxi/test/AIDRS/benchmark_chr1"
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("bench_dir", nargs="?",
+                        default="/datf/hanxi/test/AIDRS/benchmark_chr1")
+    parser.add_argument("--full-diff-limit", type=int, default=50,
+                        help="Max Gained/Lost model_keys to print per case "
+                             "(0 = unlimited). Full list is always written to "
+                             "<bench_dir>/diffs/ when --write-diff is set.")
+    parser.add_argument("--write-diff", action="store_true",
+                        help="Write row-level Gained/Lost TSVs to <bench_dir>/diffs/")
+    args = parser.parse_args()
+
+    bench_dir = args.bench_dir
+    diffs_dir = os.path.join(bench_dir, "diffs")
 
     runs = {
         "v0.3 Baseline": os.path.join(
@@ -81,6 +118,7 @@ def main():
         return
 
     base_set = models["v0.3 Baseline"]
+    base_df = dfs["v0.3 Baseline"]
 
     print("\n" + "=" * 80)
     print(" AIDRS 2.0 Factorial Benchmark Summary (chr1)")
@@ -96,6 +134,7 @@ def main():
         if name not in models:
             continue
         cur_set = models[name]
+        cur_df = dfs[name]
         shared = base_set & cur_set
         gained = cur_set - base_set
         lost = base_set - cur_set
@@ -105,10 +144,28 @@ def main():
         print(f"  Shared w/ v0.3  : {len(shared)} ({len(shared)/max(len(base_set),1):.1%})")
         print(f"  Gained (+)     : {len(gained)}")
         print(f"  Lost   (-)     : {len(lost)}")
+
+        limit = args.full_diff_limit
         if gained:
-            print(f"  Sample Gained  : {list(gained)[:3]}")
+            gained_list = sorted(gained)
+            shown = gained_list if limit == 0 else gained_list[:limit]
+            print(f"  Gained (showing {len(shown)}/{len(gained_list)}):")
+            for k in shown:
+                print(f"    + {k}")
+            if limit and len(gained_list) > limit:
+                print(f"    ... and {len(gained_list) - limit} more (run with --full-diff-limit 0)")
         if lost:
-            print(f"  Sample Lost    : {list(lost)[:3]}")
+            lost_list = sorted(lost)
+            shown = lost_list if limit == 0 else lost_list[:limit]
+            print(f"  Lost (showing {len(shown)}/{len(lost_list)}):")
+            for k in shown:
+                print(f"    - {k}")
+            if limit and len(lost_list) > limit:
+                print(f"    ... and {len(lost_list) - limit} more (run with --full-diff-limit 0)")
+
+        if args.write_diff:
+            write_diff(diffs_dir, "v0.3", name, base_df, cur_df, gained, lost)
+            print(f"  Row-level diff written to {diffs_dir}/<safe_case>_vs_v0p3.{{gained,lost}}.tsv")
         print()
 
     # 4-way robustness matrix (Case 1 as the new golden)
