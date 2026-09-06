@@ -26,6 +26,14 @@ def scientific_sha(tsv_path):
     if missing:
         print(f"{tsv_path}: missing columns: {missing}", file=sys.stderr)
         return None
+    # Deterministic row order across runs: explicit physical sort so
+    # concurrent SSC accumulation cannot perturb the SHA. Excludes
+    # TrID/GeneID/GeneName (run-counter columns) and any
+    # run-order-dependent identifier; uses only the physical-coord
+    # columns + a stable freq tiebreaker.
+    sort_cols = ["Chr", "TrStart", "TrEnd", "Strand", "SSC", "frequency"]
+    present = [c for c in sort_cols if c in df.columns]
+    df = df.sort_values(present, kind="mergesort").reset_index(drop=True)
     text = df[SCIENTIFIC_COLS].to_csv(sep="\t", index=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
