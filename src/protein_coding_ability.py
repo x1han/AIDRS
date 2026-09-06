@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
 from Bio import SeqIO
@@ -20,6 +20,7 @@ from functools import partial
 # keras models once and serves all sequences; orf_predict_by_translationai
 # no longer spawns one subprocess per (Chr, Strand).
 from .aidrs_runtime.translationai_runner import TranslationAIRunner
+from .aidrs_runtime.concurrency import drain_futures_loud
 
 class TranslationAI_ORF:
     def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=8):
@@ -249,45 +250,12 @@ class TranslationAI_ORF:
                     executor.submit(TranslationAI_ORF._run_translationai_worker, task)
                     for task in tasks
                 ]
-                # Industrial-grade worker death detection (replaces silent-swallow).
-                # Collect ALL worker exceptions instead of swallowing; raise
-                # RuntimeError after pool drains if any died. Also guard the
-                # "all workers exit 0 but produce 0 files" silent path via a
-                # post-condition rglob on fanout_root.
-                failed_workers = []
+                # Fail-loud: aggregate ALL worker exceptions (no silent swallow)
+                # and post-condition rglob to catch zero-output silent path.
+                drain_futures_loud(futures, stage_name="2.4 TranslationAI")
 
-                try:
-                    for future in as_completed(futures):
-                        exc = future.exception()
-                        if exc is not None:
-                            failed_workers.append(exc)
-                            logger.critical(
-                                f"[TranslationAI WORKER CRASHED]: {exc}",
-                                exc_info=exc,
-                            )
-                        else:
-                            # Explicit result() to surface any blocking issue
-                            # not surfaced via .exception()
-                            future.result()
-                except Exception as pool_err:
-                    logger.critical(
-                        f"[TranslationAI POOL FAILURE]: ProcessPoolExecutor failed: {pool_err}",
-                        exc_info=pool_err,
-                    )
-                    raise RuntimeError(
-                        f"[FATAL] TranslationAI process pool failed: {pool_err}"
-                    ) from pool_err
-
-                # 1. Block on worker-level crashes
-                if failed_workers:
-                    raise RuntimeError(
-                        f"[FATAL] {len(failed_workers)}/{len(futures)} "
-                        f"TranslationAI worker(s) crashed! "
-                        f"First error: {failed_workers[0]!r}. "
-                        f"Check logs for full tracebacks."
-                    )
-
-                # 2. Block on silent zero-output path (Caveat 3)
+                # Block on silent zero-output path: workers exit 0 but produce
+                # zero _predORFs_*.txt files (e.g., empty model loading).
                 pred_files = list(Path(fanout_root).rglob("*_predORFs_0.5_0.5.txt"))
                 if len(df_groups) > 0 and not pred_files:
                     raise RuntimeError(
