@@ -28,11 +28,61 @@ sys.path.insert(0, REPO)
 
 # Import the gtf2ssc module directly without going through src/__init__.py,
 # which pulls in aidrs.py and a sibling refactor that's still in flight.
+# gtf2ssc.py uses `from .aidrs_runtime.concurrency import ...`, which is a
+# relative import that requires a package context. We satisfy it by
+# registering a synthetic `src` package + a stub `src.aidrs_runtime.concurrency`
+# module before loading gtf2ssc. The real concurrency module is not needed:
+# the test exercises build_ssc_inner() (defined inline below as a replica of
+# the per-transcript block at gtf2ssc.py:95-106), not main().
 import importlib.util
+
+_SRC = os.path.join(REPO, "src")
+
+# Register an empty 'src' package (skip __init__.py execution)
+_spec_pkg = importlib.util.spec_from_loader("src", loader=None, is_package=True)
+_src_pkg = importlib.util.module_from_spec(_spec_pkg)
+_src_pkg.__path__ = [_SRC]
+sys.modules["src"] = _src_pkg
+
+# Register an empty 'src.aidrs_runtime' package
+_spec_ar = importlib.util.spec_from_loader(
+    "src.aidrs_runtime", loader=None, is_package=True
+)
+_ar_pkg = importlib.util.module_from_spec(_spec_ar)
+_ar_pkg.__path__ = [os.path.join(_SRC, "aidrs_runtime")]
+sys.modules["src.aidrs_runtime"] = _ar_pkg
+
+# Stub src.aidrs_runtime.concurrency with the two names gtf2ssc imports.
+# The stubs are never CALLED in this test (we only test build_ssc_inner
+# inlined below), so plain functions are sufficient.
+def _stub_drain_futures_loud(futures, stage_name, allow_partial=False):
+    raise RuntimeError(
+        "stub drain_futures_loud called; build_ssc_inner test should not "
+        "invoke main() -- if this fires, a test is exercising real GTF I/O."
+    )
+
+
+def _stub_get_process_pool(num_workers, mp_context=None):
+    raise RuntimeError(
+        "stub get_process_pool called; build_ssc_inner test should not "
+        "invoke main() -- if this fires, a test is exercising real GTF I/O."
+    )
+
+
+_spec_cc = importlib.util.spec_from_loader(
+    "src.aidrs_runtime.concurrency", loader=None, is_package=False
+)
+_cc_mod = importlib.util.module_from_spec(_spec_cc)
+_cc_mod.drain_futures_loud = _stub_drain_futures_loud
+_cc_mod.get_process_pool = _stub_get_process_pool
+sys.modules["src.aidrs_runtime.concurrency"] = _cc_mod
+
+# Now load gtf2ssc as src.gtf2ssc so the relative import resolves.
 _spec = importlib.util.spec_from_file_location(
-    "gtf2ssc", os.path.join(REPO, "src", "gtf2ssc.py")
+    "src.gtf2ssc", os.path.join(_SRC, "gtf2ssc.py")
 )
 gtf2ssc = importlib.util.module_from_spec(_spec)
+sys.modules["src.gtf2ssc"] = gtf2ssc
 _spec.loader.exec_module(gtf2ssc)
 
 
