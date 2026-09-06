@@ -18,10 +18,15 @@ Algorithm (expert-approved, per workspace/findings/):
    transcript_id. If no overlap exists between the two ID sets, the
    validator fails loudly (the TrID space is not GENCODE-compatible).
 
-4. Physical match metrics (TIS_related_location / TTS_related_location are
-   taken verbatim from the Case 1 TSV; they are 1-based CDS-relative
-   offsets stored as strings -- a value of "no" indicates TranslationAI
-   did not predict a CDS, and the row is excluded from TIS/TTS metrics):
+4. Physical match metrics. TIS_related_location / TTS_related_location are
+   0-based cDNA position indices into the spliced mRNA (emitted by
+   TranslationAI's `np.argsort` over the cDNA length). They are NOT
+   CDS-relative offsets. Conversion to genomic coordinates is done by
+   ``predict_genomic_tis_tts`` via exon-walking: walk the SSC exon list
+   in strand-aware 5'->3' order, subtract cumulative exon length, and
+   return the genomic coordinate of the predicted TIS/TTS. A value of
+   "no" indicates TranslationAI did not predict a CDS, and the row is
+   excluded from TIS/TTS metrics):
 
    - TIS exact match: |Predicted_TIS_pos - Official_CDS_start| == 0
                      AND same chromosome and same strand
@@ -60,7 +65,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Standalone-invocation PYTHONPATH bootstrap (consistent with diff_sha.py,
 # extract_scientific_sha.py).
@@ -190,10 +195,11 @@ def load_fsm_rows(
 def _parse_tis_tts(value) -> Optional[int]:
     """Translate a TIS_related_location / TTS_related_location cell to an int.
 
-    The Case 1 TSV stores these as CDS-relative offsets (1-based) drawn from
-    the Codingblock predictor: an integer like "139", or the literal "no"
-    when TranslationAI found no CDS. Any non-integer cell (NaN, "NA", etc.)
-    returns None and is excluded from TIS/TTS metrics.
+    The Case 1 TSV stores these as 0-based cDNA position indices drawn from
+    TranslationAI's `np.argsort` over the cDNA length: an integer like
+    "253", or the literal "no" when TranslationAI found no CDS. Any
+    non-integer cell (NaN, "NA", etc.) returns None and is excluded from
+    TIS/TTS metrics.
     """
     if value is None:
         return None
@@ -208,29 +214,113 @@ def _parse_tis_tts(value) -> Optional[int]:
         return None
 
 
-def predict_genomic_tis_tts(row, cds_start: int, cds_end: int, strand: str) -> Tuple[
-    Optional[int], Optional[int]
-]:
-    """Convert a row's CDS-relative TIS/TTS offsets into genomic coordinates.
+def _row_exons(row, strand: str) -> Optional[List[Tuple[int, int]]]:
+    """Parse the row's SSC column into a strand-aware exon list.
 
-    Case 1 TSV TIS_related_location / TTS_related_location are CDS-relative
-    (1 = first codon of CDS). For a '+' strand transcript:
-        TIS_geno = cds_start + (offset - 1)
-        TTS_geno = cds_start + (offset - 1)  (also CDS-relative)
-    For '-' strand, offsets are still 1-based from the 5' end of the CDS
-    in transcript orientation -- which means in genomic coordinates they
-    decrease as offset increases. We invert:
-        TIS_geno = cds_end   - (offset - 1)
-        TTS_geno = cds_end   - (offset - 1)
+    SSC encodes intron boundaries as a dash-separated list of 2*(n-1)
+    integers (consecutive exon_i.end - exon_{i+1}.start). For a single-exon
+    transcript SSC == "NA" -- the only exon is (TrStart, TrEnd).
+
+    Returns:
+        List of (start, end) tuples in transcript 5'->3' order:
+        - '+' strand: sorted by genomic start ascending
+        - '-' strand: sorted by genomic start descending (so index 0 is
+          the first exon transcribed)
+        None if TrStart/TrEnd/SSC are missing or unparseable.
     """
+    try:
+        tr_start = int(row["TrStart"])
+        tr_end = int(row["TrEnd"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    ssc_raw = row.get("SSC")
+    if ssc_raw is None or (isinstance(ssc_raw, float) and pd.isna(ssc_raw)):
+        return [(tr_start, tr_end)]
+    ssc = str(ssc_raw).strip()
+    if not ssc or ssc.upper() == "NA":
+        return [(tr_start, tr_end)]
+    try:
+        nums = [int(x) for x in ssc.split("-")]
+    except ValueError:
+        return None
+    # Pair up [tr_start] + SSC numbers + [tr_end] into (start, end) exons.
+    positions = [tr_start] + nums + [tr_end]
+    if len(positions) % 2 != 0 or len(positions) < 2:
+        return None
+    exons = list(zip(positions[0::2], positions[1::2]))
+    if strand == "+":
+        return sorted(exons, key=lambda x: x[0])
+    if strand == "-":
+        return sorted(exons, key=lambda x: x[0], reverse=True)
+    return None  # invalid strand handled by caller
+
+
+def cdna_to_genomic_coordinate(
+    cdna_offset: int,
+    exons: List[Tuple[int, int]],
+    strand: str,
+) -> Optional[int]:
+    """Map a 1-based cDNA offset to its genomic coordinate.
+
+    Walks the exon list in transcript 5'->3' order (already sorted by the
+    caller), subtracting each exon's length until the offset falls inside
+    the current exon, then returns the corresponding genomic coordinate.
+
+    Args:
+        cdna_offset: 1-based offset from mRNA 5' end (1 <= offset <= total)
+        exons: list of (start, end) tuples in 1-based closed intervals,
+               already ordered by transcript 5'->3' direction
+        strand: '+' or '-'
+
+    Returns:
+        int genomic coordinate, or None if offset is out of range.
+    """
+    if cdna_offset < 1 or not exons:
+        return None
+    remaining = cdna_offset
+    for start, end in exons:
+        exon_len = end - start + 1
+        if remaining <= exon_len:
+            if strand == "+":
+                return start + (remaining - 1)
+            if strand == "-":
+                return end - (remaining - 1)
+            return None  # invalid strand
+        remaining -= exon_len
+    return None
+
+
+def predict_genomic_tis_tts(row, strand: str) -> Tuple[Optional[int], Optional[int]]:
+    """Convert a row's cDNA-position TIS/TTS indices into genomic coordinates.
+
+    Case 1 TSV TIS_related_location / TTS_related_location are 0-based
+    cDNA position indices into the spliced mRNA (TranslationAI emits them
+    via ``np.argsort``). To map them to genomic coordinates we:
+      1. Parse SSC + TrStart/TrEnd into an ordered exon list.
+      2. Convert the 0-based index to a 1-based cDNA offset (+1).
+      3. Walk the exons strand-aware, subtracting cumulative length, until
+         the offset falls inside the current exon, then return the genomic
+         coordinate of that nucleotide.
+
+    Returns (None, None) when the row has no TIS/TTS prediction (the
+    literal "no" from TranslationAI), the strand is invalid, or SSC is
+    unparseable.
+    """
+    exons = _row_exons(row, strand)
+    if exons is None:
+        return None, None
     tis_off = _parse_tis_tts(row.get("TIS_related_location"))
     tts_off = _parse_tis_tts(row.get("TTS_related_location"))
-    if strand == "+":
-        tis_geno = cds_start + (tis_off - 1) if tis_off is not None else None
-        tts_geno = cds_start + (tts_off - 1) if tts_off is not None else None
-    else:  # '-' strand
-        tis_geno = cds_end - (tis_off - 1) if tis_off is not None else None
-        tts_geno = cds_end - (tts_off - 1) if tts_off is not None else None
+    tis_geno = (
+        cdna_to_genomic_coordinate(tis_off + 1, exons, strand)
+        if tis_off is not None
+        else None
+    )
+    tts_geno = (
+        cdna_to_genomic_coordinate(tts_off + 1, exons, strand)
+        if tts_off is not None
+        else None
+    )
     return tis_geno, tts_geno
 
 
@@ -276,7 +366,7 @@ def score_matches(
         # vs '1') in case the GENCODE reference uses different prefixes.
         if str(row["Chr"]) != chr_off or str(row["Strand"]) != strand:
             continue
-        tis_geno, tts_geno = predict_genomic_tis_tts(row, cds_start, cds_end, strand)
+        tis_geno, tts_geno = predict_genomic_tis_tts(row, strand)
         if tis_geno is not None:
             n_tis_pred += 1
             d = abs(tis_geno - cds_start)
