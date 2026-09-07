@@ -8,6 +8,22 @@ If reference annotations are available, AIDRS incorporates conserved, low-abunda
 
 AIDRS incorporates [TranslationAI](https://github.com/rnasys/TranslationAI) for protein coding potential prediction and [Puffin](https://github.com/jzhoulab/puffin) for enhanced TSS prediction.
 
+## Operational Scope & Guarantees (v1.0.0)
+
+- **Platform**: Oxford Nanopore native Direct RNA-Seq (DRS) only — `SQK-RNA002` / `SQK-RNA004`. The pipeline was developed and validated against BAM alignments produced by Minimap2 with `-uf -k 14 -y` flags (no reverse complement).
+- **Genetic Code**: NCBI Translation Table 1 (Standard Nuclear). Mitochondrial transcripts (`chrM`) are processed for splice structure but excluded from canonical CDS / NMD benchmark assertions; full mitochondrial codon-table support is planned for v1.1.
+- **Reference Genome**: Requires a matched uncompressed / bgzipped genomic FASTA and a comprehensive gene annotation GTF (GENCODE / Ensembl).
+- **Benchmark Accuracy** (HEK293T C107 chr1, GENCODE v47, FSM set with CDS):
+  - TIS single-base exact match rate: **74.47%** (≥ 70% gate)
+  - TTS single-base exact match rate: **65.96%**
+  - TIS in-frame rate: **63.79%**
+  - Median physical coordinate error: **0.0 bp**
+- **Known Limitations**:
+  - Single-exon (mono-exonic) transcripts are evaluated by the Stage 2.5b 5-pillar funnel but were absent from the chr1 benchmark dataset.
+  - Cross-chromosome centromeric / telomeric chimeras and alternative-pseudogene loci are not separately characterized.
+  - Whole-genome runs are not yet characterized; v1.0.0 baseline is established on chr1 only.
+- **Determinism**: 16-col scientific SHA-256 baseline (`tools/extract_scientific_sha.py`) sorts output rows by physical coordinates to guarantee cross-node, cross-thread SHA stability.
+
 ## 🧬 AIDRS Enhanced Features
 
 - **Protein Coding Potential Prediction**: Using deep learning models to assess transcript coding ability and precise identification of start and stop codons
