@@ -362,16 +362,13 @@ class TranslationAI_ORF:
                         cumulative_length += abs(end - start + 1)
                         junction_positions.append(cumulative_length)
                     
-                    # Check if stop codon is located upstream of any exon-exon junction by ≥55nt
+                    # Check if stop codon is located upstream of the LAST exon-exon junction by ≥55nt (SQANTI3/Ensembl convention)
                     if tts_pos <= junction_positions[-1] - 55:
                         ejc_dependent_nmd = True
                 
                 # EJC-independent NMD determination - check 3' UTR length
                 ejc_independent_nmd = False
-                
-                # Calculate total CDS length (from TIS to TTS)
-                total_cds_length = tts_pos - tis_pos + 1
-                
+
                 # Calculate total transcript length
                 total_transcript_length = sum(abs(end - start + 1) for start, end in exon_ranges)
                 
@@ -502,8 +499,6 @@ class TranslationAI_ORF:
             for df_group in df_groups:
                 Chrom = df_group['Chr'].unique()[0]
                 Strand = df_group['Strand'].unique()[0]
-
-                tss_col = 'TrStart' if Strand == '+' else 'TrEnd'
 
                 # F-008 fix: drop TranslationAI result columns from df_group
                 # BEFORE merge. df_group enters this stage with TIS/TTS

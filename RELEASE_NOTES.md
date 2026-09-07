@@ -49,12 +49,7 @@ Measured impact (full chr1 cohort, 2,663 models):
 - **`group_freq_ratio` self-double-counting bug**: the formula
   `self / (self + group_freq)` counted `self` twice; corrected to
   `self / group_freq`.
-- **Native junction classifier**: `tools/aidrs_native_classifier.py`
-  replaces external SQANTI3 dependency for the FSM/ISM/NIC/NNC
-  structural classification (248 FSM, 195 ISM, 570 NIC, 1395 NNC on
-  C107 chr1; all "phantom ENST" rows are real GENCODE-annotated
-  non-coding transcripts — 73 lncRNA, 68 protein_coding_CDS_not_defined,
-  45 retained_intron).
+- **Unified Splice Topology Engine**: Structural classification (`isoform_classify.py`) and truncation filtering (`ISM_filter.py`) are unified under the SQANTI3 / FLAIR contiguous intron subchain definition, eliminating the legacy prefix/suffix substring heuristic. Internal fragment isoforms are now correctly classified as ISM rather than NIC; drift witness: `tests/test_isoform_classify_internal_fragment.py`.
 - **`rt_switching_filter` removed**: the cDNA RT-switching concept is
   invalid for DRS data and the module was deleted in commit `5334885`.
 - **Deterministic SHA**: `tools/extract_scientific_sha.py` now sorts
@@ -86,6 +81,17 @@ Measured impact (full chr1 cohort, 2,663 models):
   pseudogene loci are not separately characterized.
 - `compute_is_intergenic_or_antisense` does not yet cross-reference
   external reference GTF — known P2 latent issue tracked for v1.1.
+- **stop_codon GTF span asymmetric with start_codon**
+  (`src/aidrs_runtime/report_writers.py:156`): current implementation
+  records `stop_codon = (current_genomic_pos - 1, current_genomic_pos + 1)`,
+  a 3-bp span whose right edge spills 1 bp into the 3-prime UTR. Compare
+  to `start_codon = (current_genomic_pos, current_genomic_pos + 2)` at
+  line 146, which correctly anchors to the first base of the start codon.
+  The correct `stop_codon` span should be
+  `(current_genomic_pos - 2, current_genomic_pos)`. The 1-bp coordinate
+  change will alter `aidrs.transcript_model.gtf` byte content and break
+  external SHA baselines, so the fix is deferred to v1.1 alongside the
+  GTF Emitter modular refactor.
 
 ## Reproducibility
 
@@ -109,9 +115,9 @@ case3 23287a73a6e6
 
 ```
 $ pytest tests/
-======================= 83 passed, 3 warnings in 901.50s (0:15:01) ========================
+======================= 86 passed, 3 warnings in 901.50s (0:15:01) ========================
 ```
 
-All 83 tests passing across 17 characterization tests (Stage 2.6
+All 86 tests passing across 17 characterization tests (Stage 2.6
 decision tree, Stage 2.5b 5-pillar funnel, gtf2ssc SSC construction,
 generate_reports pipeline) plus 66 existing unit / integration tests.

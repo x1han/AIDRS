@@ -1,6 +1,7 @@
 import pandas as pd
 import multiprocessing as mp
 from .gene_grouping import GeneClustering
+from .ISM_filter import _parse_introns, _is_contiguous_intron_subchain
 
 
 class IsoformClassifier:
@@ -14,12 +15,29 @@ class IsoformClassifier:
         return ref_ssc_set, ref_site_set
 
     @staticmethod
-    def _get_isoform_category_for_row(row_ssc, row_sites, ref_ssc_set, ref_site_set):
+    def _build_reference_intron_list(df_ref):
+        """Pre-compute per-reference intron chains for the ISM sub-chain check.
+
+        Returns a list of intron-list records, one per reference row, in the
+        order they appear in ``df_ref``.  Paired with the corresponding
+        ``SSC`` string so the per-row ISM check can pair them up.
+        """
+        ref_ssc_values = df_ref['SSC'].values
+        ref_introns = [
+            _parse_introns(tr_start, ssc, tr_end)
+            for tr_start, ssc, tr_end in zip(
+                df_ref['TrStart'].values, ref_ssc_values, df_ref['TrEnd'].values
+            )
+        ]
+        return list(zip(ref_ssc_values, ref_introns))
+
+    @staticmethod
+    def _get_isoform_category_for_row(row_ssc, row_introns, row_sites, ref_ssc_set, ref_site_set, ref_intron_records):
         if row_ssc in ref_ssc_set:
             return 'FSM'
 
-        for ref_ssc in ref_ssc_set:
-            if ref_ssc.startswith(row_ssc) or ref_ssc.endswith(row_ssc):
+        for _ref_ssc, ref_introns in ref_intron_records:
+            if _is_contiguous_intron_subchain(row_introns, ref_introns):
                 return 'ISM'
 
         if set(row_sites).issubset(ref_site_set):
@@ -43,16 +61,22 @@ class IsoformClassifier:
                 continue
 
             ref_ssc_set, ref_site_set = IsoformClassifier._prepare_reference_sets(df_ref)
+            ref_intron_records = IsoformClassifier._build_reference_intron_list(df_ref)
 
             df_data = df_data.copy()
+            df_data['_row_introns'] = df_data.apply(
+                lambda row: _parse_introns(row['TrStart'], row['SSC'], row['TrEnd']),
+                axis=1,
+            )
             df_data['row_sites'] = df_data['SSC'].str.split('-').map(lambda lst: list(map(int, lst)))
             df_data['category'] = df_data.apply(
                 lambda row: IsoformClassifier._get_isoform_category_for_row(
-                    row['SSC'], row['row_sites'], ref_ssc_set, ref_site_set
+                    row['SSC'], row['_row_introns'], row['row_sites'],
+                    ref_ssc_set, ref_site_set, ref_intron_records
                 ),
                 axis=1
             )
-            df_data.drop(columns='row_sites', inplace=True)
+            df_data.drop(columns=['_row_introns', 'row_sites'], inplace=True)
             results.append(df_data)
 
         return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
@@ -65,8 +89,8 @@ class IsoformClassifier:
 
     def add_category(self, df1, df_ref):
         df1 = df1.drop(columns=['category'], errors='ignore')
-        df = df1[['Chr', 'Strand', 'SSC']].copy()
-        df_ref = df_ref[['Chr', 'Strand', 'SSC']].copy()
+        df = df1[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']].copy()
+        df_ref = df_ref[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']].copy()
         df_ref = df_ref.drop_duplicates()
         df['source'] = 'data'
         df_ref['source'] = 'ref'

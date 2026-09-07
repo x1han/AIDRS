@@ -9,7 +9,7 @@ assessment TSV -- they will NOT appear otherwise.
 from typing import List
 
 
-# Core 17-column assessment schema (order-sensitive: matches the
+# Core 19-column assessment schema (order-sensitive: matches the
 # pre-Stage-2.7 layout that produced the byte-identical C107 100k
 # baseline SHA a8469106...).
 CORE_ASSESSMENT_COLS: List[str] = [
