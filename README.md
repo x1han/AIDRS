@@ -68,7 +68,7 @@ aidrs \
 
 ### Notes
 
-- SG-NEx DRS datasets may lack polyA tags in the BAM file when produced by older ONT basecallers; in those cases AIDRS skips polyA-based isoform filtering.
+- SG-NEx DRS datasets were sequenced on ONT RNA002 chemistry, which may not emit per-read polyA tags in the BAM; in those cases AIDRS skips polyA-based isoform filtering.
 - Reference-guided mode (`--gtf_anno`) is **off by default**. Enable it when you want AIDRS to rescue GENCODE-annotated isoforms with low read support.
 - For detailed parameter information, see the **aidrs --help**.
 ---
