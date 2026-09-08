@@ -62,7 +62,13 @@ def get_bam_read_counts(bam_files, threads):
         return {}, 0
     threads_per_bam = max(1, threads // num_bams) if num_bams > 0 else 1
 
-    with mp.Pool(processes=num_bams) as pool:
+    # Cap workers at the user-supplied thread budget. Spawning num_bams
+    # workers is wasteful when num_bams >> threads (e.g. 55-BAM full run on
+    # an 8-core box) and can trigger resource contention / hangs. Use the
+    # smaller of num_bams and threads, matching the pattern already used
+    # by merge_results() and main() below.
+    pool_workers = min(num_bams, threads)
+    with mp.Pool(processes=pool_workers) as pool:
         results = pool.starmap(count_single_bam, [(bam, threads_per_bam) for bam in bam_files])
 
     bam_lines = dict(results)
