@@ -239,7 +239,7 @@ def isoform_validating(df, args, ref_anno=None):
     terminalsitesprocessor = TerminalSitesProcessor(
         cluster_group_size=args.cluster_group_size,
         eps=args.eps,
-        dbscan_min_neighbors=args.dbscan_min_neighbors,
+        min_neighbors=args.dbscan_min_neighbors,
         num_processes=args.threads,
         extrem_terminal=args.extrem_terminal
     )
