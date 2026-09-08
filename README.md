@@ -1,4 +1,4 @@
-# AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq
+`# AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq
 
 **AIDRS** (AI-Aided Isoform Discovery for direct RNA-Seq) is an advanced sequencing data–driven framework for full-length RNA isoform reconstruction and quantification from Oxford Nanopore Technology Direct RNA sequencing. Inspired by [ISAtools](https://github.com/shizhuoxing/ISAtools), AIDRS extends the functionality with additional capabilities for protein coding potential prediction and translation site identification.
 
@@ -68,7 +68,7 @@ aidrs \
 
 ### Notes
 
-- AIDRS was developed and validated against direct RNA-Seq; SG-NEx also provides K562 data in direct cDNA format if you want to compare protocols.
+- SG-NEx may have not polyA tags in the BAM file, so AIDRS may not filter isoforms depending on polyA information.
 - Reference-guided mode (`--gtf_anno`) is **off by default**. Enable it when you want AIDRS to rescue GENCODE-annotated isoforms with low read support.
 - For detailed parameter information, see the **aidrs --help**.
 ---
