@@ -85,6 +85,12 @@ def run_Ref2SSC(gtf_anno, output, num_threads):
     os.makedirs(process_dir, exist_ok=True)
 
     output_SSC = os.path.join(process_dir, "anno.ssc")
+    # Resolve to absolute path BEFORE the subprocess starts. The gtf2ssc
+    # subprocess runs with cwd=repo_root (so its relative imports resolve),
+    # which means any relative `-o` path would be interpreted against the
+    # repo cwd, not the caller's cwd. abspath pins the output to where the
+    # caller (and aidrs's downstream readers) expects it.
+    output_SSC = os.path.abspath(output_SSC)
     current_dir = os.path.dirname(os.path.realpath(__file__))
     # gtf2ssc.py uses relative imports (`from .aidrs_runtime.concurrency ...`),
     # so it must run as part of the `src` package. Pin subprocess cwd to the
