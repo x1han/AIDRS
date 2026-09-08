@@ -239,7 +239,7 @@ def isoform_validating(df, args, ref_anno=None):
     terminalsitesprocessor = TerminalSitesProcessor(
         cluster_group_size=args.cluster_group_size,
         eps=args.eps,
-        min_samples=args.min_samples,
+        dbscan_min_neighbors=args.dbscan_min_neighbors,
         num_processes=args.threads,
         extrem_terminal=args.extrem_terminal
     )
@@ -453,92 +453,92 @@ def run_pipeline(args, ref_anno=None):
 
 
 def parse_args(cmd_args):
-    parser = argparse.ArgumentParser(description="AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq")
-    parser.add_argument("--reference", "-r", type=str, required=True, help="Reference genome FASTA file.")
-    parser.add_argument("--bam", "-b", type=str, required=True, nargs='+', help="Input BAM file(s).")
-    parser.add_argument("--output", "-o", type=str, default="aidrs_output", help="Output directory. Default: aidrs_output")
-    parser.add_argument("--threads", "-t", type=int, default=4, help="Number of threads to use. Default: 4")
-    parser.add_argument("--keep_temp", action="store_true", help="Keep intermediate files in the temp directory.")
+    parser = argparse.ArgumentParser(
+        description="AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    # Alignment filtering
-    parser.add_argument("--min_aln_identity", type=float, default=0.95, help="Minimum alignment identity. Default: 0.95")
-    parser.add_argument("--min_aln_coverage", type=float, default=0, help="Minimum alignment coverage. Default: 0")
+    # === Required inputs ===
+    inp = parser.add_argument_group("Required inputs")
+    inp.add_argument("--reference", "-r", type=str, required=True, help="Reference genome FASTA file.")
+    inp.add_argument("--bam", "-b", type=str, required=True, nargs='+', help="Input BAM file(s), one or more.")
+    inp.add_argument("--output", "-o", type=str, default="aidrs_output", help="Output directory. Default: aidrs_output")
 
-    # SSC filtering
-    parser.add_argument("--filter_freq", type=float, default=5, help="Minimum read support to retain an SSC. Default: 5")
-    parser.add_argument("--min_junction_freq", type=float, default=5, help="Minimum read support for splice junctions. Default: 5")
-    parser.add_argument("--junction_freq_ratio", type=float, default=0.25, help="Minimum frequency ratio for junction screening. Default: 0.25")
+    # === Core pipeline ===
+    core = parser.add_argument_group("Core pipeline")
+    core.add_argument("--threads", "-t", type=int, default=4, help="Worker processes. Default: 4")
+    core.add_argument("--keep_temp", action="store_true", help="Keep temp/*.ssc intermediate files.")
+    core.add_argument("--filter_freq", type=float, default=5, help="Min read support to retain an SSC (Stage 1.2). Default: 5")
 
-    # Consensus filtering
-    parser.add_argument("--consensus_bp", type=int, default=20, help="Allowed deviation (bp) in consensus correction. Default: 20")
-    parser.add_argument("--consensus_ratio", type=float, default=0.1, help="Supporting read ratio for consensus correction. Default: 0.1")
+    # === Alignment filtering (Stage 0) ===
+    aln = parser.add_argument_group("Alignment filtering (Stage 0)")
+    aln.add_argument("--min_aln_identity", type=float, default=0.95, help="Min alignment identity. Default: 0.95")
+    aln.add_argument("--min_aln_coverage", type=float, default=0, help="Min alignment coverage. Default: 0")
 
-    # Graph edge filtering
-    parser.add_argument("--threshold_lowWeight_edges", type=float, default=0.05, help="Threshold ratio for filtering weak edges. Default: 0.05")
+    # === SSC filtering & error correction (Stage 1) ===
+    ssc = parser.add_argument_group("SSC filtering & error correction (Stage 1)")
+    ssc.add_argument("--junction_freq_ratio", type=float, default=0.25, help="Min frequency ratio for junction screening. Default: 0.25")
+    ssc.add_argument("--consensus_bp", type=int, default=20, help="Allowed deviation (bp) in consensus correction. Default: 20")
+    ssc.add_argument("--consensus_ratio", type=float, default=0.1, help="Supporting read ratio for consensus correction. Default: 0.1")
+    ssc.add_argument("--threshold_lowWeight_edges", type=float, default=0.05, help="Threshold ratio for filtering weak graph edges. Default: 0.05")
+    ssc.add_argument("--error_sites_diff_bp", type=int, default=10, help="Max position deviation for suspected error sites. Default: 10")
+    ssc.add_argument("--error_sites_ratio", type=float, default=0.05, help="Frequency ratio for error site detection (no ref). Default: 0.05")
+    ssc.add_argument("--error_sites_ratio_ref", type=float, default=0.1, help="Frequency ratio for error site detection (with ref). Default: 0.1")
+    ssc.add_argument("--little_exon_bp", type=int, default=30, help="Max size for a small exon. Default: 30")
+    ssc.add_argument("--little_exon_mismatch_diff_bp", type=int, default=10, help="Position diff for small exon mismatch. Default: 10")
+    ssc.add_argument("--Nonlittle_exon_mismatch_diff_bp", type=int, default=20, help="Mismatch diff for non-small exons. Default: 20")
+    ssc.add_argument("--little_exon_jump_ratio", type=float, default=0.05, help="Exon-skipping detection ratio (no ref). Default: 0.05")
+    ssc.add_argument("--little_exon_jump_ratio_ref", type=float, default=0.1, help="Exon-skipping detection ratio (with ref). Default: 0.1")
+    ssc.add_argument("--Nonlittle_exon_jump_ratio", type=float, default=0.05, help="Non-small exon-skipping detection ratio (no ref). Default: 0.05")
+    ssc.add_argument("--Nonlittle_exon_jump_ratio_ref", type=float, default=0.1, help="Non-small exon-skipping detection ratio (with ref). Default: 0.1")
+    ssc.add_argument("--threshold_truncation_source_freq", type=float, default=0.5, help="Source SSC frequency ratio for truncation. Default: 0.5")
+    ssc.add_argument("--threshold_truncation_group_freq", type=float, default=0.5, help="Group frequency ratio for truncation filter. Default: 0.5")
+    ssc.add_argument("--trunc_simp_filter", action="store_true", help="Apply simple truncation filtering.")
+    ssc.add_argument("--threshold_fragmentary_transcript_bp", type=int, default=100, help="Min length to retain transcript. Default: 100")
 
-    # NNC/NIC filtering
-    # parser.add_argument("--exon_excursion_diff_bp", type=int, default=20, help="Maximum exon position deviation allowed. Default: 20")
-    parser.add_argument("--error_sites_diff_bp", type=int, default=10, help="Max position deviation for suspected error sites. Default: 10")
-    parser.add_argument("--error_sites_ratio", type=float, default=0.05, help="Read ratio threshold for error site detection (no ref). Default: 0.05")
-    parser.add_argument("--error_sites_ratio_ref", type=float, default=0.1, help="Read ratio threshold for error site detection (with ref). Default: 0.1")
-    parser.add_argument("--little_exon_bp", type=int, default=30, help="Maximum size for a small exon. Default: 30")
-    parser.add_argument("--little_exon_mismatch_diff_bp", type=int, default=10, help="Position difference for mismatch in small exons. Default: 10")
-    parser.add_argument("--Nonlittle_exon_mismatch_diff_bp", type=int, default=20, help="Mismatch difference threshold for non-small exons. Default: 20")
-    parser.add_argument("--little_exon_jump_ratio", type=float, default=0.05, help="Ratio threshold for exon skipping detection (no ref). Default: 0.05")
-    parser.add_argument("--little_exon_jump_ratio_ref", type=float, default=0.1, help="Ratio threshold for exon skipping detection (with ref). Default: 0.1")
-    parser.add_argument("--Nonlittle_exon_jump_ratio", type=float, default=0.05, help="Ratio threshold for non-small exon skipping detection (no ref). Default: 0.05")
-    parser.add_argument("--Nonlittle_exon_jump_ratio_ref", type=float, default=0.1, help="Ratio threshold for non-small exon skipping detection (with ref). Default: 0.1")
+    # === Annotation-guided filtering (Stage 1.9) ===
+    anno = parser.add_argument_group("Annotation-guided filtering (Stage 1.9, requires --gtf_anno)")
+    anno.add_argument("--gtf_anno", "-g", type=str, default=None, help="Reference annotation GTF/GFF (enables Stage 1.9 rescue).")
+    anno.add_argument("--mapping_to_reference", action="store_true", help="Enable mapping to reference for improved accuracy.")
+    anno.add_argument("--mismatch_error_sites_bp", type=int, default=20, help="Max deviation to define mismatched error sites. Default: 20")
+    anno.add_argument("--mismatch_error_sites_groupfreq_ratio", type=float, default=0.25, help="Read ratio threshold for mismatch errors. Default: 0.25")
+    anno.add_argument("--fake_exon_bp", type=int, default=50, help="Max length of a potential fake exon. Default: 50")
+    anno.add_argument("--fake_exon_group_freq_ratio", type=float, default=0.1, help="Group ratio for fake exon detection (no ref). Default: 0.1")
+    anno.add_argument("--fake_exon_group_freq_ratio_ref", type=float, default=0.2, help="Group ratio for fake exon detection (with ref). Default: 0.2")
 
-    # ISM truncation filtering
-    parser.add_argument("--threshold_truncation_source_freq", type=float, default=0.5, help="Ratio threshold of source SSCs for truncation. Default: 0.5")
-    parser.add_argument("--threshold_truncation_group_freq", type=float, default=0.5, help="Ratio threshold for group truncation filtering. Default: 0.5")
-    parser.add_argument("--trunc_simp_filter", action="store_true", help="Apply simple truncation filtering (remove truncated transcripts). Default: False")
+    # === Boundary prediction (Stage 2.1, DBSCAN) ===
+    bdry = parser.add_argument_group("Boundary prediction (Stage 2.1, DBSCAN)")
+    bdry.add_argument("--cluster_group_size", type=int, default=1500, help="Max group size for TS clustering. Default: 1500")
+    bdry.add_argument("--eps", type=int, default=15, help="DBSCAN epsilon (bp distance threshold). Default: 15")
+    bdry.add_argument("--dbscan_min_neighbors", type=int, default=20, help="DBSCAN minimum points per cluster. Default: 20")
+    bdry.add_argument("--extrem_terminal", action="store_true", help="Use extreme terminal sites instead of representatives.")
 
-    # Fragmentary transcript filtering
-    parser.add_argument("--threshold_fragmentary_transcript_bp", type=int, default=100, help="Minimum length required to retain transcript. Default: 100")
+    # === Functional filtering (Stage 2.2-2.7) ===
+    func = parser.add_argument_group("Functional filtering (Stage 2.2-2.7)")
+    func.add_argument("--puffin_prediction_threshold", type=float, default=0.02, help="Puffin TSS prediction threshold. Default: 0.02")
+    func.add_argument("--polya_fraction_threshold", type=float, default=0.95, help="PolyA fraction threshold for transcript filtering. Default: 0.95")
+    func.add_argument("--translationai_score_threshold", type=float, default=0.9, help="TranslationAI TIS/TTS score threshold. Default: 0.9 (ignored when --no_translationai is set)")
+    func.add_argument("--no_translationai", action="store_true",
+        help="Skip Stage 2.4 TranslationAI. Output has TIS/TTS='no' and Predict_NMD='no_orf'; "
+             "CDS/UTR annotations in the GTF output will be empty.")
+    func.add_argument("--hard_filter", action="store_true", help="Hard filtering based on Puffin_TSS_15bp and polyA_frac thresholds.")
 
-    # Annotation-based filtering
-    parser.add_argument("--gtf_anno", "-g", type=str, default=None, help="Optional GTF/GFF file for annotation-based transcript rescue and filtering.")
-    parser.add_argument("--mapping_to_reference", action="store_true", help="Enable mapping to reference annotation for improved accuracy")
-    parser.add_argument("--mismatch_error_sites_bp", type=int, default=20, help="Max deviation to define mismatched error sites. Default: 20")
-    parser.add_argument("--mismatch_error_sites_groupfreq_ratio", type=float, default=0.25, help="Read ratio threshold for mismatch errors. Default: 0.25")
-    parser.add_argument("--fake_exon_bp", type=int, default=50, help="Max length of a potential fake exon. Default: 50")
-    parser.add_argument("--fake_exon_group_freq_ratio", type=float, default=0.1, help="Group ratio threshold for fake exon detection (no ref). Default: 0.1")
-    parser.add_argument("--fake_exon_group_freq_ratio_ref", type=float, default=0.2, help="Group ratio threshold for fake exon detection (with ref). Default: 0.2")
-    # parser.add_argument("--ism_freqRatio_notrun", type=float, default=0.5, help="Minimum ratio to retain non-truncated ISMs. Default: 0.5")
+    # === Quantification (Stage 3) ===
+    quant = parser.add_argument_group("Quantification (Stage 3)")
+    quant.add_argument("--min_expressed_samples", type=int, default=1,
+        help="Retain transcripts expressed in >= N samples in the count matrix. Default: 1 (no-op; set >1 for multi-sample consensus filtering).")
 
-    # Transcription start/end prediction
-    parser.add_argument("--cluster_group_size", type=int, default=1500, help="Max group size for TS clustering. Default: 1500")
-    parser.add_argument("--eps", type=int, default=15, help="DBSCAN epsilon (distance threshold). Default: 15")
-    parser.add_argument("--min_samples", type=int, default=20, help="Minimum samples for TS cluster. Default: 20")
-    parser.add_argument("--extrem_terminal", action="store_true", help="Use extreme terminal sites instead of representative sites. Default: False")
-    parser.add_argument("--puffin_prediction_threshold", type=float, default=0.02, help="Puffin prediction threshold for TSS annotation and filtering. Default: 0.02")
-    parser.add_argument("--polya_fraction_threshold", type=float, default=0.95, help="PolyA fraction threshold for transcript filtering. Default: 0.95")
-    parser.add_argument("--translationai_score_threshold", type=float, default=0.9, help="TranslationAI score threshold for ORF prediction. Default: 0.9 (ignored when --no_translationai is set)")
-    parser.add_argument("--no_translationai", action="store_true",
-        help="Skip Stage 2.4 TranslationAI ORF/NMD prediction. Output will have "
-             "TIS/TTS columns set to 'no' and Predict_NMD set to 'no_orf' for every "
-             "transcript. CDS/UTR annotations in the GTF output will be empty.")
-    parser.add_argument("--hard_filter", action="store_true", help="Hard filtering based on Puffin_TSS_15bp and polyA_frac thresholds.")
+    # === Site correction (advanced) ===
+    ss = parser.add_argument_group("Site correction (advanced)")
+    ss.add_argument("--ss_tolerance", type=int, default=15, help="Splice site tolerance for correction. Default: 15")
+    ss.add_argument("--terminal_tolerance", type=int, default=50, help="TSS/TES terminal tolerance for correction. Default: 50")
 
-    # Stage boundary fail-loud diagnostics (opt-in; default OFF so existing pipelines
-    # keep their observed row counts byte-for-byte).
-    parser.add_argument("--strict_stage_checks", action="store_true",
-        help="Enable strict stage-boundary checks: abort (sys.exit(1)) if any "
-             "of stages 1.2/1.4/1.5/1.8/2.5b/2.6 drops >= its fail threshold "
-             "(see stage_check.STAGE_THRESHOLDS). Default: False (informational "
-             "logging only).")
-    parser.add_argument("--allow-zero-rows", action="store_true",
-        help="Opt-out of the hard zero-row invariant in stage_boundary_check "
-             "(n_before>0 AND n_after==0 normally aborts the run). Intended "
-             "for testing/synthetic-data runs only. Default: False.")
-    
-    # Thresholds for splice site (SS) and transcription start/end site (TSS/TES) correction
-    parser.add_argument("--ss_tolerance", type=int, default=15, help="Splice site tolerance threshold for correction. Default: 15")
-    parser.add_argument("--terminal_tolerance", type=int, default=50, help="Terminal site (TSS/TES) tolerance threshold for correction. Default: 50")
-    
-    # Quantification options
-    parser.add_argument("--min_samples_expr", type=int, default=1, help="Minimum number of samples with expression to retain transcript in count matrix. Default: 1")
+    # === Diagnostics & observability ===
+    diag = parser.add_argument_group("Diagnostics & observability")
+    diag.add_argument("--strict_stage_checks", action="store_true",
+        help="Fail-loud if any stage (1.2/1.4/1.5/1.8/2.5b/2.6) drops >= fail threshold. Default: False (informational logging only).")
+    diag.add_argument("--allow-zero-rows", action="store_true",
+        help="Opt out of the hard zero-row invariant in stage_boundary_check. For testing/synthetic data only. Default: False.")
 
     args = parser.parse_args(cmd_args)
     return args

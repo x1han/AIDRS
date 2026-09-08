@@ -7,10 +7,10 @@ from scipy.spatial.distance import cdist
 from collections import Counter
 
 class TerminalSitesProcessor:
-    def __init__(self, cluster_group_size=1500, eps=15, min_samples=20, num_processes=10, extrem_terminal=False):
+    def __init__(self, cluster_group_size=1500, eps=15, min_neighbors=20, num_processes=10, extrem_terminal=False):
         self.cluster_group_size = cluster_group_size
         self.eps = eps
-        self.min_samples = min_samples
+        self.min_neighbors = min_neighbors
         self.num_processes = num_processes
         self.extrem_terminal = extrem_terminal
 
@@ -19,8 +19,8 @@ class TerminalSitesProcessor:
             values = values.sample(n=self.cluster_group_size, random_state=42)
 
         X = np.array(values).reshape(-1, 1)
-        min_samples = max(int(len(X) * 0.1), self.min_samples)
-        labels = DBSCAN(eps=self.eps, min_samples=min_samples).fit_predict(X)
+        min_neighbors = max(int(len(X) * 0.1), self.min_neighbors)
+        labels = DBSCAN(eps=self.eps, min_samples=min_neighbors).fit_predict(X)
 
         df = pd.DataFrame({'value': values, 'cluster': labels})
         valid_clusters = [c for c in df['cluster'].unique() if c != -1]

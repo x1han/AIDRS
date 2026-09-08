@@ -711,7 +711,7 @@ def correct_flnc(ref_df: pd.DataFrame,
         terminalsitesprocessor = TerminalSitesProcessor(
             cluster_group_size=args.cluster_group_size,
             eps=args.eps,
-            min_samples=args.min_samples,
+            min_neighbors=args.dbscan_min_neighbors,
             num_processes=args.threads
         )
         out_df = terminalsitesprocessor.get_terminal_sites(out_df)

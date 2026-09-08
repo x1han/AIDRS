@@ -10,16 +10,16 @@ from tqdm import tqdm
 
 
 class IsoformQuantifier:
-    def __init__(self, num_processes=10, min_samples_expr=1):
+    def __init__(self, num_processes=10, min_expressed_samples=1):
         """
         Initialize the IsoformQuantifier.
 
         Args:
             num_processes (int): Number of processes for parallel processing
-            min_samples_expr (int): Minimum number of samples with expression to retain transcript in count matrix
+            min_expressed_samples (int): Minimum number of samples with expression to retain transcript in count matrix
         """
         self.num_processes = num_processes
-        self.min_samples_expr = min_samples_expr
+        self.min_expressed_samples = min_expressed_samples
 
     def quantify_sample(self, sample_name: str, transcript_model_df: pd.DataFrame, output_dir: str) -> pd.DataFrame:
         """
@@ -229,8 +229,8 @@ class IsoformQuantifier:
         )
         # Ensure count matrix uses integer type
         transcript_count_matrix = transcript_count_matrix.astype(int)
-        # Apply min_samples_expr filter
-        transcript_count_matrix = transcript_count_matrix[transcript_count_matrix.iloc[:, 3:].gt(0).sum(axis=1) >= min(transcript_count_matrix.shape[1] - 3, self.min_samples_expr)]
+        # Apply min_expressed_samples filter
+        transcript_count_matrix = transcript_count_matrix[transcript_count_matrix.iloc[:, 3:].gt(0).sum(axis=1) >= min(transcript_count_matrix.shape[1] - 3, self.min_expressed_samples)]
         
         # Calculate transcript CPM
         transcript_cpm_data = []

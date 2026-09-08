@@ -67,7 +67,7 @@ class IsoformAnnotator:
             sample_names = [os.path.splitext(os.path.basename(bam))[0] for bam in args.bam]
 
         # Get quantification parameters from args
-        min_samples_expr = getattr(args, 'min_samples_expr', 1) if args is not None else 1
+        min_samples_expr = getattr(args, 'min_expressed_samples', 1) if args is not None else 1
 
         # Create quantifier with options
         quantifier = IsoformQuantifier(
