@@ -41,6 +41,8 @@ from pkg_resources import resource_filename  # noqa: E402
 from translationai.fa_to_h5_converter import convert_fa_to_h5  # noqa: E402
 from translationai.utils import categorical_crossentropy_2d, clip_datapoints  # noqa: E402
 
+from src.aidrs_runtime.device_manager import device_manager
+
 logger = logging.getLogger("AIDRS")
 
 
@@ -59,6 +61,8 @@ class TranslationAIRunner:
 
         # Load 5 models ONCE. Fail-Fast on any corrupted .h5.
         self.models = []
+        self.use_gpu = device_manager.transai_use_gpu
+        self.batch_size = 128 if self.use_gpu else self.BATCH_SIZE
         for v in self.MODELS_USED:
             model_name = f"models/translationAI_{self.MODEL_SCALE}_{v}.h5"
             model_path = resource_filename("translationai", model_name)
@@ -146,7 +150,7 @@ class TranslationAIRunner:
                 # Ensemble averaging across all 5 models. CRITICAL: verbose=0
                 # suppresses Keras progress bar.
                 for m in self.models:
-                    Yp = m.predict(Xc, batch_size=self.BATCH_SIZE, verbose=0)
+                    Yp = m.predict(Xc, batch_size=self.batch_size, verbose=0)
                     if not isinstance(Yp, list):
                         Yp = [Yp]
                     Yps[0] += Yp[0] / self.N_VERSIONS
@@ -226,6 +230,7 @@ class TranslationAIRunner:
             f"DiskIO: {t4 - t3:.3f}s | Total: {t4 - self._t0:.3f}s"
         )
 
+        device_manager.cleanup_tf_vram()
         return fn_orf if num_idx > 0 else None
 
     # ------------------------------------------------------------------

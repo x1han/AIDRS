@@ -39,6 +39,8 @@ if _REPO_ROOT not in sys.path:
 
 from aided.Puffin.puffin import Puffin  # noqa: E402
 
+from src.aidrs_runtime.device_manager import device_manager
+
 warnings.filterwarnings("ignore", category=UserWarning, module="selene_sdk")
 
 logger = logging.getLogger("AIDRS")
@@ -65,8 +67,15 @@ class PuffinRunner:
         os.environ["MKL_NUM_THREADS"] = str(self._num_threads)
         torch.set_num_threads(self._num_threads)
 
+        self.use_gpu = device_manager.puffin_use_gpu
+        self.device = device_manager.puffin_device
+        self._base_to_index = {"A": 0, "a": 0, "C": 1, "c": 1, "G": 2, "g": 2, "T": 3, "t": 3}
+        self._bases_arr = "ACGT"
+
         # Load model once (CPU only — matches legacy puffin.py path on this box).
-        self.model = Puffin(use_cuda=False)
+        self.model = Puffin(use_cuda=self.use_gpu)
+        if self.use_gpu:
+            self.model = self.model.to(self.device)
         self.model.eval()  # disable dropout / BN running stats updates
 
         # Load genome once.
@@ -135,6 +144,35 @@ class PuffinRunner:
         # Each sample gets its own `model(seq[None,:,:].transpose(1,2))` call.
         # We still benefit from loading the model and genome once (the
         # legacy code paid an N-model-load cost).
+        if self.use_gpu:
+            # GPU mode: batched inference; CPU sequential path below preserves byte identity.
+            batch_size = 128
+            results = {}
+            with torch.inference_mode():
+                with torch.cuda.amp.autocast(enabled=True):
+                    for i in range(0, len(sequences_bp), batch_size):
+                        batch_chunk = sequences_bp[i : i + batch_size]
+                        batch_tensors = []
+                        for _, seq_bp in batch_chunk:
+                            enc = sequences.sequence_to_encoding(
+                                seq_bp,
+                                base_to_index=self._base_to_index,
+                                bases_arr=self._bases_arr,
+                            )
+                            batch_tensors.append(
+                                torch.FloatTensor(enc)[None, :, :].transpose(1, 2)
+                            )
+                        x_batch = torch.stack(batch_tensors).to(self.device)
+                        preds = self.model(x_batch).detach().cpu().numpy()
+                        for k_i, (key, seq_bp) in enumerate(batch_chunk):
+                            seq_len = len(seq_bp)
+                            pred_np = preds[k_i]
+                            trimmed = pred_np[:, self.TRIM : seq_len - self.TRIM]
+                            self._write_csv(puffin_out_path, key, seq_bp, trimmed)
+                            results[key] = trimmed
+            device_manager.cleanup_torch_vram()
+            return results
+
         all_preds = []
         with torch.no_grad():
             for _, seq_bp in sequences_bp:
