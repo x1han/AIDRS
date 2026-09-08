@@ -72,7 +72,7 @@ class IsoformAnnotator:
         # Create quantifier with options
         quantifier = IsoformQuantifier(
             num_processes=self.num_processes,
-            min_samples_expr=min_samples_expr
+            min_expressed_samples=min_samples_expr
         )
 
         # Only proceed with quantification if we have sample names
