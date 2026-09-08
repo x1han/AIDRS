@@ -86,11 +86,17 @@ def run_Ref2SSC(gtf_anno, output, num_threads):
 
     output_SSC = os.path.join(process_dir, "anno.ssc")
     current_dir = os.path.dirname(os.path.realpath(__file__))
+    # gtf2ssc.py uses relative imports (`from .aidrs_runtime.concurrency ...`),
+    # so it must run as part of the `src` package. Pin subprocess cwd to the
+    # repo root so `python -m src.gtf2ssc` resolves the `src` package
+    # regardless of the parent's CWD (e.g. when aidrs.py is invoked from a
+    # results directory via `cd <results_dir> && python -m src.aidrs`).
+    repo_root = os.path.dirname(current_dir)
     cmd = [sys.executable, "-m", "src.gtf2ssc",
         "-i", gtf_anno,
         "-o", output_SSC,
         "-w", str(num_threads)]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, cwd=repo_root)
 
 def read_flnc(flnc_path):
     dtypes_flnc = {
