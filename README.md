@@ -70,8 +70,7 @@ aidrs \
 
 - AIDRS was developed and validated against direct RNA-Seq; SG-NEx also provides K562 data in direct cDNA format if you want to compare protocols.
 - Reference-guided mode (`--gtf_anno`) is **off by default**. Enable it when you want AIDRS to rescue GENCODE-annotated isoforms with low read support.
-- The default `--filter_freq` is 5; lower it (`--filter_freq 1`) for low-coverage samples and `--filter_freq 10` for deeply sequenced ones.
-
+- For detailed parameter information, see the **aidrs --help**.
 ---
 
 ## 📁 Output Files
