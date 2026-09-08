@@ -63,6 +63,7 @@ aidrs \
     -r example/ref/GRCh38.primary_assembly.genome.fa.gz \
     -b example/SGNex_K562_directRNA_replicate1_run1.bam \
     -g example/ref/gencode.primary_assembly.annotation.gtf \
+    --min_expressed_samples 1 \
     -o example/output
 ```
 
