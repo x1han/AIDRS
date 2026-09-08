@@ -74,7 +74,7 @@ class TruncationProcessor:
         # candidate of some other_row, if it carries a Puffin promoter signal
         # at its OWN 5' end, it is an independent TSS isoform (alternative
         # promoter), not a degradation artifact. Default 0.1 matches the
-        # Stage 2.5b mono-exon Pillar 5 threshold (user decision 2026-09-04).
+        # Stage 2.5b mono-exon Pillar 5 threshold.
         self.puffin_tss_rescue = puffin_tss_rescue
 
     def _assess_truncation_for_Chr(self, df_clustered_Chr):
@@ -145,7 +145,7 @@ class TruncationProcessor:
             np.inf
         )
         df['group_freq'] = df.groupby(['Chr', 'Strand', 'Group'],observed=True)['frequency'].transform('sum')
-        # BUGFIX 2026-09-06: group_freq_ratio was double-counting self.
+        # group_freq_ratio must exclude self from denominator.
         df['group_freq_ratio'] = np.where(
             df['truncation_source'] != 'full',
             df['frequency'] / df['group_freq'],

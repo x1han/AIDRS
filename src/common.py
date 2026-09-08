@@ -86,8 +86,7 @@ def run_Ref2SSC(gtf_anno, output, num_threads):
 
     output_SSC = os.path.join(process_dir, "anno.ssc")
     current_dir = os.path.dirname(os.path.realpath(__file__))
-    gtf2SSC_script = os.path.join(current_dir,'gtf2ssc.py')
-    cmd = [sys.executable, gtf2SSC_script,
+    cmd = [sys.executable, "-m", "src.gtf2ssc",
         "-i", gtf_anno,
         "-o", output_SSC,
         "-w", str(num_threads)]

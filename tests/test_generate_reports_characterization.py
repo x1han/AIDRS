@@ -146,7 +146,7 @@ def test_reverse_complement():
     """
     inst = IsoformAnnotator(num_processes=1)
 
-    # Pinned SHAs (captured 2026-09-06 against current tree):
+    # Pinned SHAs:
     #   'ATGC'         -> 'GCAT'          sha 987a9d04a44b...
     #   'AAAACCCGGT'   -> 'ACCGGGTTTT'    sha 4bb19dcd9d44...
     #   'ATGCATGC'     -> 'GCATGCAT'      sha 2ce780d4e041...
@@ -202,7 +202,7 @@ def test_build_ref_dict():
         f"_build_ref_dict (no_term) keys: {sorted(d_without.keys())}"
     )
 
-    # Pin SHAs (captured 2026-09-06 against the fixture defined above):
+    # Pin SHAs:
     with_term_sha = "68d82195741407678e909396da015191b302c926440a79edf0e8f3202ea01f64"
     without_term_sha = "98ae7d1b395061ec68ca68483b662aa3d63c5e15971f9c0c3748c598c896036e"
 
@@ -321,7 +321,7 @@ def test_annotate_one_group_novel_only():
         f"got {list(out.columns)}"
     )
 
-    # SHA-pin the TSV (captured 2026-09-06):
+    # SHA-pin the TSV:
     expected_sha = "260e07c2ace298d8184bfac0b21861ee8d24bd670e17d386195d1f4b5974828d"
     tsv = out.to_csv(sep="\t", index=False)
     actual_sha = _sha_str(tsv)

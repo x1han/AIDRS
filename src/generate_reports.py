@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import logging
 import numpy as np
 import pandas as pd
 from functools import partial
@@ -9,6 +10,8 @@ from typing import Optional, Dict, List, Union, Tuple, Any
 from collections import defaultdict
 import glob
 import polars as pl
+
+logger = logging.getLogger(__name__)
 
 from .common import read_flnc
 from .gene_grouping import GeneClustering
@@ -64,14 +67,10 @@ class IsoformAnnotator:
             sample_names = [os.path.splitext(os.path.basename(bam))[0] for bam in args.bam]
 
         # Get quantification parameters from args
-        include_low_quality = getattr(args, 'include_low_quality', False) if args is not None else False
-        use_truncate_weight = getattr(args, 'use_truncate_weight', False) if args is not None else False
         min_samples_expr = getattr(args, 'min_samples_expr', 1) if args is not None else 1
 
         # Create quantifier with options
         quantifier = IsoformQuantifier(
-            include_low_quality=include_low_quality,
-            use_truncate_weight=use_truncate_weight,
             num_processes=self.num_processes,
             min_samples_expr=min_samples_expr
         )
@@ -88,13 +87,21 @@ class IsoformAnnotator:
                 )
 
                 # Intersect matrices with model
-                quantification_matrices, filtered_annotated_df = quantifier.intersect_matrices_with_model(
+                # intersect_matrices_with_model returns 3-tuple:
+                #   (filtered_matrices, filtered_transcript_model, filtered_quant_df).
+                # The caller previously unpacked only 2 values → ValueError caught
+                # silently by the outer `except Exception` → count/cpm matrices never
+                # written.
+                (quantification_matrices,
+                 filtered_annotated_df,
+                 _filtered_quant_df) = quantifier.intersect_matrices_with_model(
                     quantification_matrices, annotated_df
                 )
 
-                # Save quantification matrices
+                # Save quantification matrices (consistent dotted naming:
+                # aidrs.{name}.tsv — matches aidrs.transcript.assessment.tsv convention).
                 for name, matrix in quantification_matrices.items():
-                    output_path = os.path.join(output_dir, f'aidrs_{name}.tsv')
+                    output_path = os.path.join(output_dir, f'aidrs.{name}.tsv')
                     matrix.to_csv(output_path, sep='\t')
 
                 # Update annotated_df with the filtered version
@@ -152,9 +159,20 @@ class IsoformAnnotator:
         )
 
         df_result_after_quant, polyA_tables = self.polyA_len_profile(df_result_after_quant, output_dir)
+        # polyA sidecars: written as Parquet so raw_polyA_lengths can be a
+        # native Arrow List<Float32> column (1NF-safe, single-cell-per-row).
+        # TSV would force comma-separated strings inside a single cell,
+        # violating 1NF and blocking downstream SQL/polars aggregation.
         for name, table in polyA_tables.items():
-            table.to_csv(os.path.join(output_dir, f'aidrs_{name}.tsv'),
-                         sep='\t')
+            out_path = os.path.join(output_dir, f'aidrs.{name}.parquet')
+            try:
+                table.to_parquet(out_path, index=False)
+                logger.info(f"Wrote polyA sidecar: {out_path} "
+                            f"({len(table)} rows, raw_polyA_lengths as List<Float32>)")
+            except Exception as e:
+                logger.error(f"[CRITICAL FAIL-LOUD] Failed to write {out_path}: "
+                             f"{type(e).__name__}: {e}", exc_info=True)
+                raise
         # ---- 6. Original assessment table ----
         # P0-C: column registry in aidrs_runtime.column_registry centralizes
         # the schema so future stages opt-in new columns without touching
@@ -503,44 +521,124 @@ class IsoformAnnotator:
     #     }
 
     def polyA_len_profile(self, df: pd.DataFrame, out_dir) -> Dict[str, pd.DataFrame]:
+        """Compute polyA tail-length statistics from flnc_correct.ssc reads.
+
+        Reads each *_flnc_correct.ssc, aggregates per (TrID, GeneID, GeneName)
+        and per GeneID with **median** as the gate statistic (mean as
+        reference; count as data-quality flag). The full per-isoform raw
+        tail-length distribution is preserved as a list column for
+        downstream single-molecule analysis.
+
+        Returns:
+            (df, dict) where dict keys are:
+              - 'transcript_polyA_len'  → collapsed-across-samples DataFrame
+                                         (TrID, GeneID, GeneName,
+                                          polyA_median, polyA_mean,
+                                          polyA_count, raw_polyA_lengths)
+              - 'gene_polyA_len'        → per-gene DataFrame
+                                         (GeneID, polyA_median, polyA_mean,
+                                          polyA_count, raw_polyA_lengths)
+
+        Both outputs are saved as Parquet by the writer loop in
+        save_results so that raw_polyA_lengths can be a native
+        Arrow List<Float32>. Empty group → polyA_median = NaN
+        (NOT 0; 0 means biologically "dead RNA tail").
+        """
         pattern = os.path.join(out_dir, 'temp', '*_flnc_correct.ssc')
         files = glob.glob(pattern)
-        samples = []
+        if not files:
+            logger.warning("polyA_len_profile: no *_flnc_correct.ssc found; "
+                           "emitting empty polyA tables.")
+            empty_tr = pd.DataFrame(
+                columns=['TrID', 'GeneID', 'GeneName',
+                         'polyA_median', 'polyA_mean', 'polyA_count']
+            )
+            empty_gn = pd.DataFrame(
+                columns=['GeneID', 'polyA_median', 'polyA_mean', 'polyA_count']
+            )
+            return df, {
+                "transcript_polyA_len": empty_tr,
+                "gene_polyA_len": empty_gn,
+            }
+        reads = []
         for f in files:
-            basename = os.path.basename(f)
-            sample = basename.replace('_flnc_correct.ssc', '')
-            samples.append(sample)
-        samples = sorted(set(samples))
-        df_all = pl.DataFrame()
-        for sample in samples:
-            flnc_file = os.path.join(out_dir, 'temp', f'{sample}_flnc_correct.ssc')
-            read_df = read_flnc(flnc_file)
+            read_df = read_flnc(f)
             if 'TrStart_reads' in read_df.columns:
                 read_df = read_df.rename(columns={'TrStart_reads': 'TrStart'})
             if 'TrEnd_reads' in read_df.columns:
                 read_df = read_df.rename(columns={'TrEnd_reads': 'TrEnd'})
-            chunk = (
-                pl.from_pandas(read_df)
-                .with_columns(
-                    Chr=pl.col("Chr").cast(str),
-                    Strand=pl.col("Strand").cast(str),
-                    SSC=pl.col("SSC").cast(str),
-                    sample=pl.lit(sample),
-                )
-                .group_by(['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'sample'])
-                .agg(pl.col("polyA_len").mean().alias("polyA_len"))
+            reads.append(read_df)
+        all_reads = pl.concat([pl.from_pandas(r) for r in reads], how='vertical_relaxed')
+        # Collapse across samples: aggregate per (Chr,Strand,SSC,TrStart,TrEnd)
+        # joining against the model to recover TrID/GeneID/GeneName. We keep
+        # the polyA_len values as a list per isoform for downstream use.
+        per_iso = (
+            all_reads
+            .filter(pl.col("polyA_len") > 0)
+            .group_by(['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd'])
+            .agg([
+                pl.col("polyA_len").median().round(1).alias("polyA_median_raw"),
+                pl.col("polyA_len").mean().round(1).alias("polyA_mean_raw"),
+                pl.col("polyA_len").count().alias("polyA_count_raw"),
+            ])
+        ).to_pandas()
+        # Join against model for TrID/GeneID/GeneName
+        model_keys = df[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd',
+                         'TrID', 'GeneID', 'GeneName']].drop_duplicates()
+        joined = model_keys.merge(
+            per_iso, on=['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd'], how='left'
+        )
+        # Now aggregate per TrID (each TrID has unique key) — keep raw list.
+        # Collect all reads (per read row, not per group already aggregated).
+        # Cast Chr/Strand/SSC to Utf8 on both sides — read_flnc yields category
+        # dtype for those columns, and Polars join refuses cat-vs-str mismatches
+        # Polars join refuses cat-vs-str mismatches.
+        reads_per_iso = (
+            all_reads
+            .with_columns([
+                pl.col("Chr").cast(pl.Utf8),
+                pl.col("Strand").cast(pl.Utf8),
+                pl.col("SSC").cast(pl.Utf8),
+            ])
+            .filter(pl.col("polyA_len") > 0)
+            .join(
+                pl.from_pandas(model_keys[['Chr', 'Strand', 'SSC', 'TrStart',
+                                            'TrEnd', 'TrID', 'GeneID', 'GeneName']])
+                .with_columns([
+                    pl.col("Chr").cast(pl.Utf8),
+                    pl.col("Strand").cast(pl.Utf8),
+                    pl.col("SSC").cast(pl.Utf8),
+                ]),
+                on=['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd'],
+                how='inner',
             )
-            df_all = pl.concat([df_all, chunk])
-        df_pd = df_all.to_pandas()
-        df = df.merge(df_pd, on = ['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'sample'], how = 'left')
-        polyA_len_mtx = df.pivot_table(
-            index=['TrID', 'GeneID', 'GeneName'],
-            columns='sample',
-            values='polyA_len',
-            fill_value=0
+        )
+        # Build per-TrID raw lists (preserving every read's tail length).
+        polyA_tr = (
+            reads_per_iso
+            .group_by(['TrID', 'GeneID', 'GeneName'])
+            .agg([
+                pl.col("polyA_len").median().round(1).alias("polyA_median"),
+                pl.col("polyA_len").mean().round(1).alias("polyA_mean"),
+                pl.col("polyA_len").count().alias("polyA_count"),
+                pl.col("polyA_len").round(1).alias("raw_polyA_lengths"),
+            ])
+            .sort(['GeneID', 'TrID'])
+            .to_pandas()
+        )
+        polyA_gn = (
+            reads_per_iso
+            .group_by(['GeneID'])
+            .agg([
+                pl.col("polyA_len").median().round(1).alias("polyA_median"),
+                pl.col("polyA_len").mean().round(1).alias("polyA_mean"),
+                pl.col("polyA_len").count().alias("polyA_count"),
+                pl.col("polyA_len").round(1).alias("raw_polyA_lengths"),
+            ])
+            .sort(['GeneID'])
+            .to_pandas()
         )
         return df, {
-                "transcript_polyA_len": polyA_len_mtx,
-                "gene_polyA_len": df.groupby(['GeneID', 'GeneName', 'sample'],
-                                         observed=True)['polyA_len'].mean().unstack(fill_value=0)
-            }
+            "transcript_polyA_len": polyA_tr,
+            "gene_polyA_len": polyA_gn,
+        }

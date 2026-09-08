@@ -538,8 +538,6 @@ def parse_args(cmd_args):
     parser.add_argument("--terminal_tolerance", type=int, default=50, help="Terminal site (TSS/TES) tolerance threshold for correction. Default: 50")
     
     # Quantification options
-    parser.add_argument("--include_low_quality", action="store_true", help="Include low-quality reads in quantification")
-    parser.add_argument("--use_truncate_weight", action="store_true", help="Use truncate weights for quantification (only relevant when --include_low_quality is set)")
     parser.add_argument("--min_samples_expr", type=int, default=1, help="Minimum number of samples with expression to retain transcript in count matrix. Default: 1")
 
     args = parser.parse_args(cmd_args)

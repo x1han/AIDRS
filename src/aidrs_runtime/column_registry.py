@@ -56,6 +56,14 @@ SCIENTIFIC_COLS: List[str] = [
 # be added here so future stages do not need to touch
 # generate_reports.py.
 OPTIONAL_ASSESSMENT_COLS: List[str] = [
+    # polyA scalar stats from polyA_len_profile.
+    # Scalar median/mean/count are written to the sidecar Parquet
+    # (aidrs.transcript.polyA_len.parquet) and may be merged into the
+    # main assessment table by callers; raw_polyA_lengths is the native
+    # Arrow List<Float32> column in the sidecar Parquet.
+    "polyA_median",
+    "polyA_mean",
+    "polyA_count",
     # Future examples (commented out until adopted):
     # "polyA_mode",
     # "category",

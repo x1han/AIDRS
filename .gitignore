@@ -228,3 +228,10 @@ temp/
 .qoder/
 
 .codegraph/
+
+# Project-local (v1.0 official)
+memory/
+test/
+tests/
+tools/
+RELEASE_NOTES.md

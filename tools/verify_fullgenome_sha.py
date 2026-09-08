@@ -2,7 +2,7 @@
 """Verify full-genome AIDRS run produces a sensible output + Stage 2.7 flag rate.
 
 Usage:
-    python tools/verify_fullgenome_sha.py /datf/hanxi/test/AIDRS/output_fullgenome_2026-09-05/
+    python tools/verify_fullgenome_sha.py /datf/hanxi/test/AIDRS/output_fullgenome/
 
 Computes the 16-col scientific SHA on the assessment.tsv file and reports:
 - Total record count (Pipeline Completion Invariant: >= 1000)
@@ -23,7 +23,7 @@ import pandas as pd
 
 from src.aidrs_runtime.column_registry import SCIENTIFIC_COLS
 
-OUTPUT_DIR = Path(sys.argv[1] if len(sys.argv) > 1 else "/datf/hanxi/test/AIDRS/output_fullgenome_2026-09-05/")
+OUTPUT_DIR = Path(sys.argv[1] if len(sys.argv) > 1 else "/datf/hanxi/test/AIDRS/output_fullgenome/")
 _ASSESSMENT_CANDIDATES = [
     "aidrs.transcript.assessment.tsv",
     "assessment.tsv",

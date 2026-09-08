@@ -806,6 +806,9 @@ class SSCGraphFilter:
         # 1.3 Classify isoforms
         if 'category' in df.columns:
             df = df.drop(columns=['category'])
+        # add_category reverted to v0.3 form (only Chr/Strand/SSC), so no
+        # rename needed here. Kept TrStart_reads/TrEnd_reads as-is to preserve
+        # downstream consistency (line 821 expects these names).
         isoformclassifier = IsoformClassifier(num_processes=processes)
         df = isoformclassifier.add_category(df, ref_anno)
         

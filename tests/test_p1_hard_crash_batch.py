@@ -1,4 +1,4 @@
-"""Unit tests for the P1-Batch hard-crash OCR findings (2026-09-05).
+"""Unit tests for the P1-Batch hard-crash OCR findings.
 
 Covers 4 distinct crash classes:
 - P1-1: Pool(processes=0) ValueError in bam2ssc.get_bam_read_counts

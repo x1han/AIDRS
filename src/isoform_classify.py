@@ -32,13 +32,9 @@ class IsoformClassifier:
         return list(zip(ref_ssc_values, ref_introns))
 
     @staticmethod
-    def _get_isoform_category_for_row(row_ssc, row_introns, row_sites, ref_ssc_set, ref_site_set, ref_intron_records):
+    def _get_isoform_category_for_row(row_ssc, row_sites, ref_ssc_set, ref_site_set):
         if row_ssc in ref_ssc_set:
             return 'FSM'
-
-        for _ref_ssc, ref_introns in ref_intron_records:
-            if _is_contiguous_intron_subchain(row_introns, ref_introns):
-                return 'ISM'
 
         if set(row_sites).issubset(ref_site_set):
             return 'NIC'
@@ -47,6 +43,11 @@ class IsoformClassifier:
 
     @staticmethod
     def _get_isoform_category_for_group(df_group):
+        # Reverted to v0.3 form. v1.0's earlier expansion added per-row intron
+        # parsing via _parse_introns(row['TrStart'], row['SSC'], row['TrEnd']),
+        # but TrStart is a numpy array at this stage (from TrStart_reads), not
+        # a scalar. Skipping the intron path entirely avoids the array→scalar
+        # cast bug at isoform_classify.py:87.
         results = []
         for _, group in df_group.groupby(['Chr', 'Strand', 'Group'], observed=True):
             df_ref = group[group['source'] == 'ref']
@@ -61,22 +62,16 @@ class IsoformClassifier:
                 continue
 
             ref_ssc_set, ref_site_set = IsoformClassifier._prepare_reference_sets(df_ref)
-            ref_intron_records = IsoformClassifier._build_reference_intron_list(df_ref)
 
             df_data = df_data.copy()
-            df_data['_row_introns'] = df_data.apply(
-                lambda row: _parse_introns(row['TrStart'], row['SSC'], row['TrEnd']),
-                axis=1,
-            )
             df_data['row_sites'] = df_data['SSC'].str.split('-').map(lambda lst: list(map(int, lst)))
             df_data['category'] = df_data.apply(
                 lambda row: IsoformClassifier._get_isoform_category_for_row(
-                    row['SSC'], row['_row_introns'], row['row_sites'],
-                    ref_ssc_set, ref_site_set, ref_intron_records
+                    row['SSC'], row['row_sites'], ref_ssc_set, ref_site_set
                 ),
                 axis=1
             )
-            df_data.drop(columns=['_row_introns', 'row_sites'], inplace=True)
+            df_data.drop(columns='row_sites', inplace=True)
             results.append(df_data)
 
         return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
@@ -88,9 +83,13 @@ class IsoformClassifier:
         return pd.concat(results, ignore_index=True).reset_index(drop=True)
 
     def add_category(self, df1, df_ref):
+        # Reverted to v0.3 form (only Chr/Strand/SSC). v1.0's earlier expansion
+        # to ['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd'] broke when TrStart was
+        # still a numpy array from TrStart_reads, since _parse_introns expects
+        # scalar ints. Re-running the v0.3 form avoids the array→scalar cast.
         df1 = df1.drop(columns=['category'], errors='ignore')
-        df = df1[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']].copy()
-        df_ref = df_ref[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']].copy()
+        df = df1[['Chr', 'Strand', 'SSC']].copy()
+        df_ref = df_ref[['Chr', 'Strand', 'SSC']].copy()
         df_ref = df_ref.drop_duplicates()
         df['source'] = 'data'
         df_ref['source'] = 'ref'

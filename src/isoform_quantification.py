@@ -10,19 +10,14 @@ from tqdm import tqdm
 
 
 class IsoformQuantifier:
-    def __init__(self, include_low_quality=False, use_truncate_weight=False, num_processes=10, min_samples_expr=1):
+    def __init__(self, num_processes=10, min_samples_expr=1):
         """
         Initialize the IsoformQuantifier.
-        
+
         Args:
-            include_low_quality (bool): Whether to include low-quality reads
-            use_truncate_weight (bool): Whether to use truncate weights for quantification (only relevant when include_low_quality is True)
             num_processes (int): Number of processes for parallel processing
             min_samples_expr (int): Minimum number of samples with expression to retain transcript in count matrix
         """
-        self.include_low_quality = include_low_quality
-        # use_truncate_weight is only meaningful when include_low_quality is True
-        self.use_truncate_weight = use_truncate_weight if include_low_quality else False
         self.num_processes = num_processes
         self.min_samples_expr = min_samples_expr
 
@@ -53,32 +48,7 @@ class IsoformQuantifier:
         
         # Match high-quality reads to transcript models
         matched_reads = self._match_reads_to_transcripts(high_quality_reads, transcript_model_df)
-        
-        # If including low-quality reads
-        if self.include_low_quality:
-            # Read low-quality reads
-            low_quality_path = os.path.join(output_dir, 'temp', f'{sample_name}_flnc.ssc')
-            if os.path.exists(low_quality_path):
-                low_quality_reads = read_flnc(low_quality_path)
-                
-                # Rename columns if needed (remove _reads suffix)
-                if 'TrStart_reads' in low_quality_reads.columns:
-                    low_quality_reads = low_quality_reads.rename(columns={'TrStart_reads': 'TrStart'})
-                if 'TrEnd_reads' in low_quality_reads.columns:
-                    low_quality_reads = low_quality_reads.rename(columns={'TrEnd_reads': 'TrEnd'})
-                
-                # Process low-quality reads that are not in high-quality set
-                low_quality_only = self._process_low_quality_reads(
-                    low_quality_reads, high_quality_reads, transcript_model_df
-                )
-                
-                # Combine matched reads with low-quality reads
-                matched_reads = pd.concat([matched_reads, low_quality_only], ignore_index=True)
-        
-        # Calculate truncate weights if needed
-        if self.use_truncate_weight:
-            matched_reads = self._calculate_truncate_weights(matched_reads, transcript_model_df)
-        
+
         # Aggregate counts by transcript
         quant_results = self._aggregate_transcript_counts(matched_reads)
         
@@ -123,120 +93,23 @@ class IsoformQuantifier:
         
         return merged
 
-    def _process_low_quality_reads(self, low_quality_reads: pd.DataFrame, 
-                                  high_quality_reads: pd.DataFrame, 
-                                  transcript_model_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Process low-quality reads that are not in the high-quality set.
-        
-        Args:
-            low_quality_reads (pd.DataFrame): Low-quality reads
-            high_quality_reads (pd.DataFrame): High-quality reads
-            transcript_model_df (pd.DataFrame): Transcript model dataframe
-            
-        Returns:
-            pd.DataFrame: Processed low-quality reads with match status
-        """
-        # Create a key for identifying reads
-        def create_read_key(df):
-            return df['Chr'].astype(str) + '_' + df['Strand'].astype(str) + '_' + \
-                   df['SSC'].astype(str) + '_' + df['TrStart'].astype(str) + '_' + df['TrEnd'].astype(str)
-        
-        # Add keys to both dataframes
-        high_quality_reads = high_quality_reads.copy()
-        low_quality_reads = low_quality_reads.copy()
-        high_quality_reads['read_key'] = create_read_key(high_quality_reads)
-        low_quality_reads['read_key'] = create_read_key(low_quality_reads)
-        
-        # Identify low-quality reads that are not in high-quality set
-        low_only_keys = set(low_quality_reads['read_key']) - set(high_quality_reads['read_key'])
-        low_quality_only = low_quality_reads[low_quality_reads['read_key'].isin(low_only_keys)].copy()
-        
-        # Remove the temporary key column
-        low_quality_only = low_quality_only.drop(columns=['read_key'])
-        # high_quality_reads = high_quality_reads.drop(columns=['read_key'])  # Not needed here
-        
-        # Initially label all as miss_case3 (single exon reads)
-        low_quality_only['match_status'] = 'miss_case3'
-        
-        # Check if any reads are fully contained within transcript ranges (truncate reads)
-        # For each transcript, check if low-quality read is contained within its range
-        for idx, transcript in transcript_model_df.iterrows():
-            # Get reads on the same chromosome and strand
-            same_chr_strand = (
-                (low_quality_only['Chr'] == transcript['Chr']) &
-                (low_quality_only['Strand'] == transcript['Strand'])
-            )
-            
-            # Check if read is contained within transcript range
-            contained = (
-                same_chr_strand &
-                (low_quality_only['TrStart'] >= transcript['TrStart']) &
-                (low_quality_only['TrEnd'] <= transcript['TrEnd'])
-            )
-            
-            # Update status for contained reads
-            low_quality_only.loc[contained, 'match_status'] = 'miss_case2'
-        
-        # Add transcript information where possible
-        low_quality_only = low_quality_only.merge(
-            transcript_model_df[['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'TrID', 'GeneID', 'GeneName']],
-            on=['Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd'],
-            how='left'
-        )
-        
-        return low_quality_only
-
-    def _calculate_truncate_weights(self, matched_reads: pd.DataFrame, 
-                                   transcript_model_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculate truncate weights for miss_case2 reads.
-        
-        Args:
-            matched_reads (pd.DataFrame): Matched reads with status labels
-            transcript_model_df (pd.DataFrame): Transcript model dataframe
-            
-        Returns:
-            pd.DataFrame: Reads with truncate weights applied
-        """
-        # For now, we'll implement a simple truncate weight calculation
-        # In a more complex implementation, this would calculate weights based on 
-        # the proportion of matched transcripts in each gene
-        
-        # Get matched reads (for calculating proportions)
-        matched = matched_reads[matched_reads['match_status'] == 'match'].copy()
-        
-        # Calculate transcript counts per gene
-        gene_transcript_counts = matched.groupby('GeneID').size().to_dict()
-        
-        # Calculate total reads per gene
-        gene_read_counts = matched.groupby('GeneID').size().to_dict()
-        
-        # For miss_case2 reads, distribute based on truncate weights
-        miss_case2_mask = matched_reads['match_status'] == 'miss_case2'
-        
-        # This is a simplified implementation - in practice, you would calculate
-        # truncate weights based on the specific overlap and distribution
-        
-        return matched_reads
-
     def _aggregate_transcript_counts(self, matched_reads: pd.DataFrame) -> pd.DataFrame:
         """
         Aggregate read counts by transcript.
-        
+
         Args:
             matched_reads (pd.DataFrame): Matched reads with status labels
-            
+
         Returns:
             pd.DataFrame: Aggregated counts by transcript
         """
         # Group by transcript information and count (using more memory-efficient method)
         matched = matched_reads[matched_reads['match_status'] == 'match']
-        
+
         if matched.empty:
             # Return empty DataFrame with correct columns if no matched reads
             return pd.DataFrame(columns=['TrID', 'GeneID', 'GeneName', 'Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd', 'count'])
-        
+
         try:
             # Use value_counts which is more memory efficient than groupby.size()
             group_cols = ['TrID', 'GeneID', 'GeneName', 'Chr', 'Strand', 'SSC', 'TrStart', 'TrEnd']
@@ -245,13 +118,7 @@ class IsoformQuantifier:
             # If still running out of memory, try chunked processing
             print(f"Warning: Memory error during aggregation, attempting chunked processing: {e}")
             transcript_counts = self._chunked_aggregate_transcript_counts(matched, group_cols)
-        
-        # If using truncate weights, add those counts
-        if self.use_truncate_weight:
-            # This would add the weighted counts from miss_case2 reads
-            # For now, we'll just count the matched reads
-            pass
-        
+
         return transcript_counts
 
     def _chunked_aggregate_transcript_counts(self, matched: pd.DataFrame, group_cols: list, chunk_size: int = 10000) -> pd.DataFrame:
@@ -345,11 +212,11 @@ class IsoformQuantifier:
                 print("Critical columns missing. Creating empty dataframe.")
                 empty_df = pd.DataFrame(columns=['TrID', 'GeneID', 'GeneName', 'count', 'sample'])
                 return {
-                    "transcript_counts": empty_df,
-                    "transcript_cpm": empty_df,
+                    "transcript.counts": empty_df,
+                    "transcript.cpm": empty_df,
                     "transcript_tpm": empty_df,
-                    "gene_counts": empty_df,
-                    "gene_cpm": empty_df,
+                    "gene.counts": empty_df,
+                    "gene.cpm": empty_df,
                     "gene_tpm": empty_df
                 }
         
@@ -413,10 +280,10 @@ class IsoformQuantifier:
         gene_cpm_matrix = gene_cpm_matrix.astype(float)
         
         return {
-            "transcript_counts": transcript_count_matrix,
-            "transcript_cpm": transcript_cpm_matrix,
-            "gene_counts": gene_count_matrix,
-            "gene_cpm": gene_cpm_matrix
+            "transcript.counts": transcript_count_matrix,
+            "transcript.cpm": transcript_cpm_matrix,
+            "gene.counts": gene_count_matrix,
+            "gene.cpm": gene_cpm_matrix
         }
     
     def intersect_matrices_with_model(self, quantification_matrices: Dict[str, pd.DataFrame], 
@@ -498,10 +365,10 @@ class IsoformQuantifier:
         
         # Create df_quant from the transcript count matrix (assuming it exists)
         # This fixes the undefined df_quant issue
-        if 'transcript_counts' in filtered_matrices:
-            df_quant = filtered_matrices['transcript_counts'].reset_index()
+        if 'transcript.counts' in filtered_matrices:
+            df_quant = filtered_matrices['transcript.counts'].reset_index()
         else:
-            # If transcript_counts doesn't exist, use the first available matrix
+            # If transcript.counts doesn't exist, use the first available matrix
             first_matrix_name = list(filtered_matrices.keys())[0]
             df_quant = filtered_matrices[first_matrix_name].reset_index()
         
@@ -527,8 +394,8 @@ class IsoformQuantifier:
         # Additional filtering: Remove transcripts that have count=0 in all samples
         # Get the transcript count matrix to check counts
         transcripts_to_keep_mask = None
-        if 'transcript_counts' in filtered_matrices:
-            count_matrix = filtered_matrices['transcript_counts']
+        if 'transcript.counts' in filtered_matrices:
+            count_matrix = filtered_matrices['transcript.counts']
             # Reset index to work with columns
             if hasattr(count_matrix, 'reset_index'):
                 count_df = count_matrix.reset_index() if isinstance(count_matrix.index, pd.MultiIndex) else count_matrix
@@ -618,12 +485,12 @@ class IsoformQuantifier:
         
         # Ensure proper data types: count matrices as int, CPM matrices as float
         for name, matrix in filtered_matrices.items():
-            if name in ['transcript_counts', 'gene_counts']:
+            if name in ['transcript.counts', 'gene.counts']:
                 # Convert count matrices to integer type
                 for col in sample_columns:
                     if matrix[col].dtype in ['int64', 'float64']:
                         matrix[col] = matrix[col].astype(int)
-            elif name in ['transcript_cpm', 'gene_cpm']:
+            elif name in ['transcript.cpm', 'gene.cpm']:
                 # Convert CPM matrices to float type
                 for col in sample_columns:
                     if matrix[col].dtype in ['int64', 'float64']:
