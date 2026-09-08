@@ -41,7 +41,7 @@ This example walks through a complete run using K562 direct RNA reads from the S
 | Resource | Where to obtain |
 |---|---|
 | Reference genome FASTA (GRCh38) | [GENCODE Human](https://www.gencodegenes.org/human/) → *Fasta files* → GRCh38.primary_assembly.genome.fa.gz |
-| Gene annotation GTF (GENCODE v47) | [GENCODE Human](https://www.gencodegenes.org/human/) → *GTF / GFF3 files* → gencode.v47.primary_assembly.annotation.gtf.gz |
+| Gene annotation GTF (GENCODE) | [GENCODE Human](https://www.gencodegenes.org/human/) → *GTF / GFF3 files* → gencode.primary_assembly.annotation.gtf.gz |
 | K562 direct RNA reads (FASTQ) | [SG-NEx K562 direct RNA replicate 1 run 1](http://sg-nex-data.s3.amazonaws.com/data/sequencing_data_ont/fastq/SGNex_K562_directRNA_replicate1_run1/) |
 
 ### Step 2 — Align reads with minimap2
@@ -62,7 +62,7 @@ The `-uf -k 14 -y` flags are required for forward-strand ONT reads and keep tag 
 aidrs \
     -r example/ref/GRCh38.primary_assembly.genome.fa.gz \
     -b example/SGNex_K562_directRNA_replicate1_run1.bam \
-    -g example/ref/gencode.v47.primary_assembly.annotation.gtf \
+    -g example/ref/gencode.primary_assembly.annotation.gtf \
     -o example/output
 ```
 
