@@ -29,45 +29,56 @@ def parse_args():
 def count_single_bam(bam, threads_per_bam):
     bai_file = bam + '.bai'
     if not os.path.exists(bai_file):
+        # Build the .bai if missing. samtools index still requires reading the
+        # full BAM body, so it is the slow path on NFS for very large BAMs --
+        # but it is also a one-time cost per BAM (the .bai is cached on disk
+        # and reused by get_chrom_offsets, process_bam_chunk_fast, and the
+        # pysam.count() path below). Generous timeout to absorb NFS bursts.
         try:
-            # T1 debug: capture stderr + 60s timeout. samtools index on a busy
-            # NFS mount or under fork can silently hang; timeout raises
-            # TimeoutExpired which propagates up and identifies this call
-            # as the stall point. stderr=PIPE lets the parent surface the
-            # actual samtools error message if index fails.
             logger.info(f'[bam2ssc] samtools index start: {bam}')
             subprocess.run(
                 ['samtools', 'index', '-@', str(threads_per_bam), bam],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=60,
+                timeout=600,
                 check=True,
             )
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
             logger.warning(f'Failed to create index for {bam} ({type(exc).__name__}: {exc}), proceeding without index')
 
+    # Fast path: pysam.AlignmentFile.count() reads the .bai index only
+    # (O(num_refs)), no full-BAM scan. This replaces the previous
+    # `samtools view -c` path, which on NFS read the entire BAM body
+    # (~40 s per 6.5 GB BAM on a busy mount) and tripped the 60 s debug
+    # timeout, failing the whole Pool.
+    if os.path.exists(bai_file):
+        try:
+            logger.info(f'[bam2ssc] pysam count (via .bai) start: {bam}')
+            with pysam.AlignmentFile(bam, 'rb', threads=threads_per_bam) as bf:
+                count = bf.count()
+            logger.info(f'[bam2ssc] pysam count (via .bai) done: {bam} = {count}')
+            return bam, count
+        except Exception as e:
+            logger.warning(f'pysam count failed for {bam}: {e}, falling back to samtools view -c')
+
+    # Slow fallback: samtools view -c reads the entire BAM body. Generous
+    # timeout because the absence of a .bai forces a full scan.
     try:
         logger.info(f'[bam2ssc] samtools view -c start: {bam}')
         result = subprocess.run(
             ['samtools', 'view', '-c', '-@', str(threads_per_bam), bam],
-            capture_output=True, text=True, timeout=60, check=True,
+            capture_output=True, text=True, timeout=600, check=True,
         )
         count = int(result.stdout.strip())
         return bam, count
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        if not os.path.exists(bai_file):
-            raise RuntimeError(
-                f"Cannot count reads in {bam}: neither a .bai index nor the samtools "
-                f"binary is available (samtools attempt failed: {e}). "
-                f"pysam.AlignmentFile.count() requires a .bai index. "
-                f"Either install samtools or create a .bai index for {bam} "
-                f"(e.g. `samtools index {bam}`)."
-            )
-        logger.warning(f'samtools view -c failed for {bam}: {e}, falling back to pysam')
-        with pysam.AlignmentFile(bam, 'rb', threads=threads_per_bam) as bf:
-            count = bf.count()
-        logger.info(f'BAM {bam} has {count} reads (via pysam)')
-        return bam, count
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(
+            f"Cannot count reads in {bam}: neither a .bai index nor the samtools "
+            f"binary produced a count (samtools attempt failed: "
+            f"{type(e).__name__}: {e}). "
+            f"Either install samtools or create a .bai index for {bam} "
+            f"(e.g. `samtools index {bam}`)."
+        )
 
 def get_bam_read_counts(bam_files, threads):
     num_bams = len(bam_files)
