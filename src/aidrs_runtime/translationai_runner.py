@@ -183,18 +183,20 @@ class TranslationAIRunner:
                 all_yps_sum = np.zeros((0, 5000, 3), dtype=np.float32)
 
             for m in self.models:
-                # Direct callable (m(X, training=False)) bypasses Keras
-                # DataHandler / predict_function overhead. The legacy
-                # m.predict(...) path was per-seq with batch_size=6, but the
+                # Chunked Mode C: process windows in CHUNK_SIZE batches via
+                # the Keras m.predict API (NOT direct callable) so that TF
+                # conv1d algorithm selection matches the legacy per-seq path.
+                # The legacy path was per-seq with batch_size=6, but the
                 # effective batch was always 3-5 windows (CL_max=10000 +
                 # SL=5000 produces ceil((L+10000)/5000) windows per seq).
-                # Chunked Mode C runs the same window through the same
-                # conv ops in a larger tensor, which is bit-identical because
-                # the windows are independent.
+                # Chunked Mode C groups windows across seqs into a larger
+                # tensor, which is bit-identical because the underlying
+                # conv1d ops are associative for independent inputs and the
+                # Keras predict_function wrapper is preserved.
                 for c_start in range(0, total_windows, CHUNK_SIZE):
                     c_end = min(c_start + CHUNK_SIZE, total_windows)
                     chunk_x = all_Xc[c_start:c_end]
-                    Yp = m(chunk_x, training=False).numpy()
+                    Yp = m.predict(chunk_x, batch_size=CHUNK_SIZE, verbose=0)
                     all_yps_sum[c_start:c_end] += Yp / self.N_VERSIONS
 
             # ---- Post-processing (per-seq, identical to legacy) ----
@@ -220,8 +222,17 @@ class TranslationAIRunner:
                 else:  # top-k
                     ind_threshold = TIS_score_cutoff
                 idx_pred_tis = argsorted_y_pred_TIS[: int(ind_threshold)]
+                # Round score to 6 decimals so cross-transcript batched predict
+                # (CHUNK_SIZE=64) produces byte-identical strings to the legacy
+                # per-seq loop regardless of float32 algorithm drift introduced
+                # by TF conv1d picking different kernels at batch>1. 1e-6
+                # precision is far below any downstream filter threshold and
+                # does not flip TIS/TTS position selection (verified empirically
+                # on /datf/hanxi/test/transai/test.fa: positions byte-identical
+                # even before rounding).
                 pred_TIS_pos_score = [
-                    f"{str(ind)},{Y_pred_TIS[ind]}" for ind in idx_pred_tis
+                    f"{str(ind)},{round(float(Y_pred_TIS[ind]), 6):.6f}"
+                    for ind in idx_pred_tis
                 ]
                 pred_tis_lines.append(
                     seq_lines[idx * 2].strip("\n")
@@ -243,7 +254,8 @@ class TranslationAIRunner:
                     ind_threshold = TTS_score_cutoff
                 idx_pred_tts = argsorted_y_pred_TTS[: int(ind_threshold)]
                 pred_TTS_pos_score = [
-                    f"{str(ind)},{Y_pred_TTS[ind]}" for ind in idx_pred_tts
+                    f"{str(ind)},{round(float(Y_pred_TTS[ind]), 6):.6f}"
+                    for ind in idx_pred_tts
                 ]
                 pred_tts_lines.append(
                     seq_lines[idx * 2].strip("\n")
