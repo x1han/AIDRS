@@ -6,12 +6,10 @@ Designed with annotation flexibility and biological fidelity in mind, AIDRS supp
 
 If reference annotations are available, AIDRS incorporates conserved, low-abundance isoforms through guided filtering and rescue steps, further enhancing transcriptome completeness.
 
-AIDRS incorporates [TranslationAI](https://github.com/rnasys/TranslationAI) for protein coding potential prediction and [Puffin](https://github.com/jzhoulab/puffin) for enhanced TSS prediction.
-
 ## 🌟 AIDRS Enhanced Features
 
-- **Enhanced TSS/TES Prediction**: Improved transcription start site identification with the Puffin model, which mitigates the 5′-end truncation inherent in direct RNA sequencing reads.
-- **Protein Coding Potential Prediction**: Using deep learning models to assess transcript coding ability and precise identification of start and stop codons.
+- **Enhanced TSS/TES Prediction**: Improved transcription start site identification with the [Puffin](https://github.com/jzhoulab/puffin) model, which mitigates the 5′-end truncation inherent in direct RNA sequencing reads.
+- **Protein Coding Potential Prediction**: Using [TranslationAI](https://github.com/rnasys/TranslationAI) to assess transcript coding ability and precise identification of start and stop codons.
 - **Poly(A) Length Assessment**: AIDRS consumes BAM files carrying per-read polyA tail lengths (typically emitted by Dorado basecalling) and emits per-isoform and per-gene tail-length distributions as Parquet sidecars. See [Poly(A) Length Outputs](#polya-length-outputs) below for the schema.
 
 ## 📦 Installation
