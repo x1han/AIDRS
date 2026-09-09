@@ -1,4 +1,4 @@
-`# AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq
+# AIDRS: AI-Aided Isoform Discovery for direct RNA-Seq
 
 **AIDRS** (AI-Aided Isoform Discovery for direct RNA-Seq) is an advanced sequencing data–driven framework for full-length RNA isoform reconstruction and quantification from Oxford Nanopore Technology Direct RNA sequencing. Inspired by [ISAtools](https://github.com/shizhuoxing/ISAtools), AIDRS extends the functionality with additional capabilities for protein coding potential prediction and translation site identification.
 
@@ -8,7 +8,7 @@ If reference annotations are available, AIDRS incorporates conserved, low-abunda
 
 AIDRS incorporates [TranslationAI](https://github.com/rnasys/TranslationAI) for protein coding potential prediction and [Puffin](https://github.com/jzhoulab/puffin) for enhanced TSS prediction.
 
-## 🧬 AIDRS Enhanced Features
+## 🌟 AIDRS Enhanced Features
 
 - **Protein Coding Potential Prediction**: Using deep learning models to assess transcript coding ability and precise identification of start and stop codons.
 - **Enhanced TSS/TES Prediction**: Improved transcription start site identification with the Puffin model.
