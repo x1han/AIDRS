@@ -283,10 +283,12 @@ def get_chrom_offsets(bam):
     chromosome boundaries that map cleanly to (start_read, end_read)
     chunk ranges.
     """
+    print(f'[bam2ssc][T1] get_chrom_offsets enter: {bam}', flush=True)
     boundaries = []
     current_chrom = None
     current_start = 0
     total_reads = 0
+    PROGRESS_EVERY = 1_000_000
     with pysam.AlignmentFile(bam, 'rb', threads=1) as bf:
         for i, read in enumerate(bf):
             total_reads = i + 1
@@ -296,9 +298,12 @@ def get_chrom_offsets(bam):
                     boundaries.append((current_chrom, current_start, i - 1))
                 current_chrom = chrom
                 current_start = i
+            if total_reads % PROGRESS_EVERY == 0:
+                print(f'[bam2ssc][T1] get_chrom_offsets progress: {bam} reads={total_reads}', flush=True)
         if current_chrom is not None or total_reads > 0:
             # Close the trailing segment (may have chrom=None for unmapped tail).
             boundaries.append((current_chrom, current_start, total_reads - 1))
+    print(f'[bam2ssc][T1] get_chrom_offsets exit: {bam} total_reads={total_reads} chroms={len(boundaries)}', flush=True)
     return boundaries, total_reads
 
 
@@ -542,8 +547,10 @@ def main():
     # legacy path.
     bam_has_index = {bam: os.path.exists(bam + '.bai') for bam in args.bam}
     bam_chrom_offsets = {}
-    for bam in args.bam:
+    print(f'[bam2ssc][T1] main pre-scan loop start: bams_with_index={sum(bam_has_index.values())}/{len(args.bam)}', flush=True)
+    for idx, bam in enumerate(args.bam):
         if bam_has_index[bam]:
+            print(f'[bam2ssc][T1] main pre-scan {idx+1}/{len(args.bam)} start: {bam}', flush=True)
             try:
                 bam_chrom_offsets[bam] = get_chrom_offsets(bam)
             except Exception as e:
@@ -551,6 +558,7 @@ def main():
                     f"Pre-scan failed for {bam}: {e}; falling back to legacy O(N) skip"
                 )
                 bam_has_index[bam] = False
+            print(f'[bam2ssc][T1] main pre-scan {idx+1}/{len(args.bam)} end: {bam}', flush=True)
 
     use_fast_path = all(bam_has_index.values()) and bam_chrom_offsets
 
