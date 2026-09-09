@@ -60,6 +60,10 @@ class PuffinRunner:
         self._t0 = time.perf_counter()
 
         # Be conservative on threads; sub-process fan-out used 4.
+        # CLI override: aidrs --threads N -> tss_annotation.num_processes -> here.
+        # qsub -V can inject OMP_NUM_THREADS from the submit host before our
+        # os.environ write below fires, so we explicitly set here AFTER any
+        # external propagation and pin torch to the same value.
         self._num_threads = max(1, int(num_threads))
         os.environ["OMP_NUM_THREADS"] = str(self._num_threads)
         os.environ["MKL_NUM_THREADS"] = str(self._num_threads)
@@ -79,7 +83,9 @@ class PuffinRunner:
         # Telemetry: ModelLoad done
         self._t1 = time.perf_counter()
         logger.info(
-            f"[Telemetry PuffinRunner] ModelLoad: {self._t1 - self._t0:.3f}s"
+            f"[Telemetry PuffinRunner] ModelLoad: {self._t1 - self._t0:.3f}s | "
+            f"num_threads={self._num_threads} (OMP={os.environ.get('OMP_NUM_THREADS')}, "
+            f"torch={torch.get_num_threads()})"
         )
 
     # ------------------------------------------------------------------
@@ -136,8 +142,13 @@ class PuffinRunner:
         # We still benefit from loading the model and genome once (the
         # legacy code paid an N-model-load cost).
         all_preds = []
+        # T1 instrumentation: per-PROGRESS_EVERY records, emit a flush=True
+        # print so SGE logs surface real-time inference progress. At 431k
+        # sites this loop can run for hours with no other log output.
+        PROGRESS_EVERY = 5000
+        total_seqs = len(sequences_bp)
         with torch.no_grad():
-            for _, seq_bp in sequences_bp:
+            for seq_idx, (_, seq_bp) in enumerate(sequences_bp):
                 enc = sequences.sequence_to_encoding(
                     seq_bp,
                     base_to_index={
@@ -152,6 +163,17 @@ class PuffinRunner:
                 x = torch.FloatTensor(enc)[None, :, :].transpose(1, 2)
                 pred = self.model(x)  # [1, 10, L]
                 all_preds.append(pred.detach().cpu().numpy()[0])
+                done = seq_idx + 1
+                if done % PROGRESS_EVERY == 0 or done == total_seqs:
+                    elapsed = time.perf_counter() - t2
+                    rate = done / elapsed if elapsed > 0 else 0.0
+                    eta = (total_seqs - done) / rate if rate > 0 else float("inf")
+                    print(
+                        f"[puffin][T1] predict_sites progress: "
+                        f"{done}/{total_seqs} rate={rate:.2f} seqs/s "
+                        f"elapsed={elapsed:.1f}s eta={eta:.0f}s",
+                        flush=True,
+                    )
 
         # Telemetry: Inference done
         t3 = time.perf_counter()
