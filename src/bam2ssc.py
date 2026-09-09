@@ -282,27 +282,36 @@ def get_chrom_offsets(bam):
     For position-sorted BAMs (typical RNA-seq), this gives stable
     chromosome boundaries that map cleanly to (start_read, end_read)
     chunk ranges.
+
+    Implementation: uses pysam's .bai index via
+    ``AlignmentFile.get_index_statistics()`` instead of iterating every
+    read. The legacy read-iteration was O(total_reads) per BAM which,
+    on a 60-BAM full run, summed to ~30 minutes of single-threaded
+    scanning even on SSD-backed storage. The index path is
+    O(num_chroms) — typically milliseconds per BAM. For position-
+    sorted BAMs (the expected input) the resulting boundary list is
+    identical to the legacy read-iteration output.
     """
     print(f'[bam2ssc][T1] get_chrom_offsets enter: {bam}', flush=True)
-    boundaries = []
-    current_chrom = None
-    current_start = 0
-    total_reads = 0
-    PROGRESS_EVERY = 1_000_000
     with pysam.AlignmentFile(bam, 'rb', threads=1) as bf:
-        for i, read in enumerate(bf):
-            total_reads = i + 1
-            chrom = read.reference_name  # None for unmapped reads
-            if chrom != current_chrom:
-                if current_chrom is not None:
-                    boundaries.append((current_chrom, current_start, i - 1))
-                current_chrom = chrom
-                current_start = i
-            if total_reads % PROGRESS_EVERY == 0:
-                print(f'[bam2ssc][T1] get_chrom_offsets progress: {bam} reads={total_reads}', flush=True)
-        if current_chrom is not None or total_reads > 0:
-            # Close the trailing segment (may have chrom=None for unmapped tail).
-            boundaries.append((current_chrom, current_start, total_reads - 1))
+        stats = bf.get_index_statistics()
+    # stats: list of (contig, mapped, unmapped, total) named tuples,
+    # one entry per reference in the BAM header plus a final entry
+    # for the unmapped bucket (contig='*'). For position-sorted BAMs
+    # the index order matches full-file iteration order.
+    boundaries = []
+    cum = 0
+    for stat in stats:
+        contig = stat.contig
+        total = stat.total
+        if total <= 0:
+            continue
+        # Map the unmapped-bucket sentinel '*' back to None so the
+        # return shape matches the legacy read-iteration path exactly.
+        chrom = None if contig == '*' else contig
+        boundaries.append((chrom, cum, cum + total - 1))
+        cum += total
+    total_reads = cum
     print(f'[bam2ssc][T1] get_chrom_offsets exit: {bam} total_reads={total_reads} chroms={len(boundaries)}', flush=True)
     return boundaries, total_reads
 
