@@ -30,13 +30,28 @@ def count_single_bam(bam, threads_per_bam):
     bai_file = bam + '.bai'
     if not os.path.exists(bai_file):
         try:
-            subprocess.run(['samtools', 'index', '-@', str(threads_per_bam), bam], check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            logger.warning(f'Failed to create index for {bam}, proceeding without index')
+            # T1 debug: capture stderr + 60s timeout. samtools index on a busy
+            # NFS mount or under fork can silently hang; timeout raises
+            # TimeoutExpired which propagates up and identifies this call
+            # as the stall point. stderr=PIPE lets the parent surface the
+            # actual samtools error message if index fails.
+            logger.info(f'[bam2ssc] samtools index start: {bam}')
+            subprocess.run(
+                ['samtools', 'index', '-@', str(threads_per_bam), bam],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            logger.warning(f'Failed to create index for {bam} ({type(exc).__name__}: {exc}), proceeding without index')
 
     try:
-        result = subprocess.run(['samtools', 'view', '-c', '-@', str(threads_per_bam), bam],
-                               capture_output=True, text=True, check=True)
+        logger.info(f'[bam2ssc] samtools view -c start: {bam}')
+        result = subprocess.run(
+            ['samtools', 'view', '-c', '-@', str(threads_per_bam), bam],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
         count = int(result.stdout.strip())
         return bam, count
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
@@ -68,8 +83,10 @@ def get_bam_read_counts(bam_files, threads):
     # smaller of num_bams and threads, matching the pattern already used
     # by merge_results() and main() below.
     pool_workers = min(num_bams, threads)
+    print(f'[bam2ssc][T1] Pool#1 get_bam_read_counts enter: workers={pool_workers} bams={len(bam_files)}', flush=True)
     with mp.Pool(processes=pool_workers) as pool:
         results = pool.starmap(count_single_bam, [(bam, threads_per_bam) for bam in bam_files])
+    print(f'[bam2ssc][T1] Pool#1 get_bam_read_counts exit', flush=True)
 
     bam_lines = dict(results)
     total_lines = sum(bam_lines.values())
@@ -506,11 +523,14 @@ def merge_results(chunk_results, fasta_file, out_dir, threads):
     for out1_tmp, out2_tmp, bam in chunk_results:
         bam_groups[bam].append((out1_tmp, out2_tmp))
 
+    print(f'[bam2ssc][T1] Pool#2 merge_results enter: workers={threads} groups={len(bam_groups)}', flush=True)
     with mp.Pool(processes=threads) as pool:
         results = pool.starmap(partial(merge_single_bam, out_dir=out_dir), bam_groups.items())
+    print(f'[bam2ssc][T1] Pool#2 merge_results exit', flush=True)
 
 def main():
     args = parse_args()
+    print(f'[bam2ssc][T1] main() entered: bams={len(args.bam)} threads={args.threads}', flush=True)
     os.makedirs(args.output, exist_ok=True)
     bam_lines, total_lines = get_bam_read_counts(args.bam, args.threads)
     chunk_allocations = allocate_chunks(args.bam, bam_lines, total_lines, args.threads)
@@ -556,8 +576,10 @@ def main():
             f"P1 perf: using .bai-based chromosome chunking across {len(tasks)} chunks"
         )
 
+    print(f'[bam2ssc][T1] Pool#3 main enter: workers={args.threads} tasks={len(tasks)}', flush=True)
     with mp.Pool(processes=args.threads) as pool:
         chunk_results = pool.starmap(worker, tasks)
+    print(f'[bam2ssc][T1] Pool#3 main exit', flush=True)
 
     merge_results(chunk_results, args.reference, args.output, args.threads)
 

@@ -74,8 +74,16 @@ def run_bam2ssc(reference, bam, output_ssc, num_threads):
         "-b", *bam,
         "-o", output_ssc,
         "-t", str(num_threads)]
-    
-    subprocess.run(cmd, check=True)
+
+    # T1 debug instrumentation: when bam2ssc hangs mid-Pool-worker with no
+    # visible output, the most common cause is Python block-buffering (4 KB
+    # default per worker) hiding stdout/stderr that hasn't flushed yet.
+    # PYTHONUNBUFFERED=1 forces line-buffered I/O so the parent's captured
+    # pipe sees per-worker progress as it happens. Combined with timeouts
+    # on the inner samtools subprocess.run calls (see bam2ssc.py), this
+    # converts an invisible hang into a fast, debuggable error.
+    child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    subprocess.run(cmd, check=True, env=child_env)
 
 def run_Ref2SSC(gtf_anno, output, num_threads):
     """
