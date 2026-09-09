@@ -10,8 +10,8 @@ AIDRS incorporates [TranslationAI](https://github.com/rnasys/TranslationAI) for 
 
 ## 🌟 AIDRS Enhanced Features
 
+- **Enhanced TSS/TES Prediction**: Improved transcription start site identification with the Puffin model, which mitigates the 5′-end truncation inherent in direct RNA sequencing reads.
 - **Protein Coding Potential Prediction**: Using deep learning models to assess transcript coding ability and precise identification of start and stop codons.
-- **Enhanced TSS/TES Prediction**: Improved transcription start site identification with the Puffin model.
 - **Poly(A) Length Assessment**: AIDRS consumes BAM files carrying per-read polyA tail lengths (typically emitted by Dorado basecalling) and emits per-isoform and per-gene tail-length distributions as Parquet sidecars. See [Poly(A) Length Outputs](#polya-length-outputs) below for the schema.
 
 ## 📦 Installation
@@ -20,7 +20,7 @@ AIDRS requires **Python 3.11** and several dependencies including `samtools`, Py
 
 We recommend using [Conda](https://docs.conda.io/) to manage dependencies and environments.
 
-### ✅ Create AIDRS environment (recommended)
+### Create AIDRS environment (recommended)
 
 ```bash
 git clone https://github.com/x1han/AIDRS.git
