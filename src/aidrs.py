@@ -60,6 +60,67 @@ def setup_logger(output_dir):
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
 
+    # Install global excepthook NOW that the FileHandler is wired up.
+    # Without this, uncaught exceptions that escape main()'s try/except
+    # (e.g. errors in module-level init, signal handlers, or the main_entry
+    # wrapper) would print only to sys.stderr — which on SGE is combined
+    # with stdout and lives on the compute node's /tmp, wiped by the qsub
+    # wrapper's `trap "rm -rf" EXIT` before we ever see it. This hook
+    # mirrors the full traceback into aidrs.log so the death site survives.
+    #
+    # We deliberately bypass logger.critical() for the traceback write and
+    # use a direct append-to-aidrs.log instead. Empirically (Python 3.11 +
+    # aidrs env), calling logger.critical() with a multi-line message from
+    # within sys.excepthook can cause the same record to be written ~80
+    # times — obscuring the real death site in noise. Direct append +
+    # os.fsync is bulletproof: one call, one block, durable to disk.
+    _excepthook_already_fired = [False]  # mutable cell so closure sees updates
+
+    def _uncaught_exception_handler(exc_type, exc_value, exc_traceback):
+        # Idempotent guard: Python can re-enter sys.excepthook multiple
+        # times during interpreter shutdown (atexit, threading.finalize).
+        if _excepthook_already_fired[0]:
+            return
+        _excepthook_already_fired[0] = True
+
+        # KeyboardInterrupt (Ctrl+C) must pass through for graceful exit.
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        import traceback as _tb
+        tb_text = "".join(_tb.format_exception(exc_type, exc_value, exc_traceback))
+        try:
+            with open(log_file, "a", encoding="utf-8") as _crash_fh:
+                _crash_fh.write("\n" + "=" * 80 + "\n")
+                _crash_fh.write(
+                    "[CRITICAL UNHANDLED CRASH] AIDRS pipeline hit an uncaught fatal exception.\n"
+                )
+                _crash_fh.write(f"Exception Type : {exc_type.__name__}\n")
+                _crash_fh.write(f"Exception Value: {exc_value}\n")
+                _crash_fh.write("Full Traceback :\n")
+                _crash_fh.write(tb_text)
+                _crash_fh.write("=" * 80 + "\n")
+                _crash_fh.flush()
+                try:
+                    os.fsync(_crash_fh.fileno())
+                except OSError:
+                    # fsync can fail on non-POSIX mounts; flush() already
+                    # wrote to OS, so durability is best-effort here.
+                    pass
+        except Exception:
+            # Last-resort: fall back to stderr so something is visible.
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        # Also flush any buffered records from normal logger.critical()
+        # calls that happened just before the crash.
+        for h in logger.handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+
+    sys.excepthook = _uncaught_exception_handler
+
     return logger
 
 
