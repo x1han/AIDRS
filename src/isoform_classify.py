@@ -5,8 +5,9 @@ from .ISM_filter import _parse_introns, _is_contiguous_intron_subchain
 
 
 class IsoformClassifier:
-    def __init__(self, num_processes=10):
-        self.num_processes = num_processes
+    def __init__(self, num_processes=None):
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
 
     @staticmethod
     def _prepare_reference_sets(df_ref):

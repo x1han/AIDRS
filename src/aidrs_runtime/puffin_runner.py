@@ -55,16 +55,20 @@ class PuffinRunner:
     # Half-window used to expand a TSS into a fetch window.
     HALF_WINDOW = 500
 
-    def __init__(self, genome_path, num_threads=4):
+    def __init__(self, genome_path, num_threads=None):
         # Telemetry: ModelLoad
         self._t0 = time.perf_counter()
 
-        # Be conservative on threads; sub-process fan-out used 4.
+        # Defer to ResourceGuard so Puffin picks up NSLOTS / host-cap
+        # instead of the legacy hardcoded default of 4 (which would
+        # oversubscribe on smp 8 allocations).
+        from .resource_guard import ResourceGuard
+        effective_threads = ResourceGuard.get_effective_cpu_threads(num_threads)
         # CLI override: aidrs --threads N -> tss_annotation.num_processes -> here.
         # qsub -V can inject OMP_NUM_THREADS from the submit host before our
         # os.environ write below fires, so we explicitly set here AFTER any
         # external propagation and pin torch to the same value.
-        self._num_threads = max(1, int(num_threads))
+        self._num_threads = max(1, int(effective_threads))
         os.environ["OMP_NUM_THREADS"] = str(self._num_threads)
         os.environ["MKL_NUM_THREADS"] = str(self._num_threads)
         torch.set_num_threads(self._num_threads)

@@ -7,8 +7,9 @@ import numpy as np
 from .aidrs_runtime.puffin_runner import PuffinRunner
 
 class TSS_Puffin:
-    def __init__(self, genome, num_processes=8, tmp_path='temp', puffin_prediction_threshold=0.02):
-        self.num_processes = num_processes
+    def __init__(self, genome, num_processes=None, tmp_path='temp', puffin_prediction_threshold=0.02):
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
         self.tmp_path = tmp_path
         self.genome = genome
         self.puffin_prediction_threshold = puffin_prediction_threshold

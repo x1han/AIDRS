@@ -23,7 +23,7 @@ from .aidrs_runtime.translationai_runner import TranslationAIRunner
 from .aidrs_runtime.concurrency import drain_futures_loud, get_process_pool
 
 class TranslationAI_ORF:
-    def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=8):
+    def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=None, bam_size_gb=4.0):
         # P7 fix: keep the original path string so we can ship it across the
         # multiprocessing pickling boundary (a live pyfaidx.Fasta is a
         # BufferedReader and cannot be pickled).
@@ -31,7 +31,12 @@ class TranslationAI_ORF:
         self.genome = Fasta(genome)
         self.tmp_path = tmp_path
         self.translationai_score_threshold = translationai_score_threshold
-        self.num_processes = num_processes
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
+        # Captured for ResourceGuard.get_safe_translationai_workers so the
+        # worker pool budget accounts for input BAM size (>8 GB BAMs need
+        # larger non-model headroom to avoid OOM at scale).
+        self.bam_size_gb = bam_size_gb
 
     @staticmethod
     def fetch_exon(row):
@@ -214,7 +219,19 @@ class TranslationAI_ORF:
         df_groups = [g for _, g in df_groups]
         if not df_groups:
             return
-        num_workers = max(1, min(self.num_processes, len(df_groups)))
+
+        # Phase 1 resource self-throttling (spec
+        # workspace/docs/aidrs_v1_1_spec_frozen_2026-09-08.md, 常温区 Task 1+2).
+        # Each worker instantiates its own 5-model ensemble per the P7
+        # contract (~3.0 GB per worker observed in pilot 1177481). Cap the
+        # pool to whatever the real memory budget can support, but never
+        # below 1 and never above the caller's request.
+        from src.aidrs_runtime.resource_guard import ResourceGuard
+        safe_dl_workers = ResourceGuard.get_safe_translationai_workers(
+            total_threads=self.num_processes,
+            bam_file_size_gb=self.bam_size_gb,
+        )
+        num_workers = max(1, min(safe_dl_workers, len(df_groups)))
 
         # P7.2 re-run safety: blow away any stale outputs from a prior
         # crashed run BEFORE we kick off the pool, so aggr_translationai_result

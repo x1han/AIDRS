@@ -10,15 +10,17 @@ from tqdm import tqdm
 
 
 class IsoformQuantifier:
-    def __init__(self, num_processes=10, min_expressed_samples=1):
+    def __init__(self, num_processes=None, min_expressed_samples=1):
         """
         Initialize the IsoformQuantifier.
 
         Args:
             num_processes (int): Number of processes for parallel processing
+                (None = defer to ResourceGuard: NSLOTS / host cap 8)
             min_expressed_samples (int): Minimum number of samples with expression to retain transcript in count matrix
         """
-        self.num_processes = num_processes
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
         self.min_expressed_samples = min_expressed_samples
 
     def quantify_sample(self, sample_name: str, transcript_model_df: pd.DataFrame, output_dir: str) -> pd.DataFrame:

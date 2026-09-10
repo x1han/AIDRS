@@ -65,11 +65,12 @@ def _is_contiguous_intron_subchain(
 
 
 class TruncationProcessor:
-    def __init__(self, threshold_truncation_source_freq=0.5, threshold_truncation_group_freq=0.5, trunc_simp_filter=False, num_processes=10, puffin_tss_rescue=0.1):
+    def __init__(self, threshold_truncation_source_freq=0.5, threshold_truncation_group_freq=0.5, trunc_simp_filter=False, num_processes=None, puffin_tss_rescue=0.1):
         self.threshold_truncation_source_freq = threshold_truncation_source_freq
         self.threshold_truncation_group_freq = threshold_truncation_group_freq
         self.trunc_simp_filter = trunc_simp_filter
-        self.num_processes = num_processes
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
         # Independent TSS rescue: even if a row is structurally a 5'-truncation
         # candidate of some other_row, if it carries a Puffin promoter signal
         # at its OWN 5' end, it is an independent TSS isoform (alternative

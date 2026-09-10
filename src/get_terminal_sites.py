@@ -7,11 +7,12 @@ from scipy.spatial.distance import cdist
 from collections import Counter
 
 class TerminalSitesProcessor:
-    def __init__(self, cluster_group_size=1500, eps=15, min_neighbors=20, num_processes=10, extrem_terminal=False):
+    def __init__(self, cluster_group_size=1500, eps=15, min_neighbors=20, num_processes=None, extrem_terminal=False):
         self.cluster_group_size = cluster_group_size
         self.eps = eps
         self.min_neighbors = min_neighbors
-        self.num_processes = num_processes
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
         self.extrem_terminal = extrem_terminal
 
     def get_representative_sites_DBSCAN(self, values, mode='min', extrem_terminal=False):

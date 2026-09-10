@@ -33,7 +33,7 @@ class SSCGraphFilter:
                  fake_exon_bp=50,
 
                  # Common parameters
-                 num_processes=10):
+                 num_processes=None):
         """
         Initialize the SSC Graph Filter with parameters from both modules.
         """
@@ -52,9 +52,10 @@ class SSCGraphFilter:
         self.fake_exon_group_freq_ratio = fake_exon_group_freq_ratio
         self.fake_exon_group_freq_ratio_ref = fake_exon_group_freq_ratio_ref
         self.fake_exon_bp = fake_exon_bp
-        
+
         # Common parameters
-        self.num_processes = num_processes
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
     
     @staticmethod
     def rescue_fsm(df_raw, df, ref_anno):

@@ -7,10 +7,11 @@ class ConsensusFilter:
     consensus
     """
 
-    def __init__(self, consensus_bp=10, consensus_ratio=0.1, num_processes=10):
+    def __init__(self, consensus_bp=10, consensus_ratio=0.1, num_processes=None):
         self.consensus_bp = consensus_bp
         self.consensus_ratio = consensus_ratio
-        self.num_processes = num_processes
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
 
     def _consensus_sites_for_chr(self, df):
         df = df.copy().reset_index(drop=True)

@@ -22,7 +22,7 @@ class MappingToReference:
                  mismatch_error_sites_groupfreq_ratio=0.25,
                  exon_excursion_diff_bp=20,
                  fake_exon_bp=50,
-                 num_processes=10):
+                 num_processes=None):
         """
         Initialize MappingToReference class with _ref suffix parameters
         """
@@ -31,14 +31,15 @@ class MappingToReference:
         self.little_exon_jump_ratio = little_exon_jump_ratio
         self.Nonlittle_exon_jump_ratio = Nonlittle_exon_jump_ratio
         self.fake_exon_group_freq_ratio = fake_exon_group_freq_ratio
-        
+
         # Other common parameters
         self.little_exon_bp = little_exon_bp
         self.mismatch_error_sites_bp = mismatch_error_sites_bp
         self.mismatch_error_sites_groupfreq_ratio = mismatch_error_sites_groupfreq_ratio
         self.exon_excursion_diff_bp = exon_excursion_diff_bp
         self.fake_exon_bp = fake_exon_bp
-        self.num_processes = num_processes
+        from .aidrs_runtime.resource_guard import ResourceGuard
+        self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
     
     @staticmethod
     def rescue_fsm(df_raw, df, ref_anno):
