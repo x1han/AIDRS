@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import gzip
 import logging
 import pandas as pd
 import numpy as np
@@ -10,6 +11,7 @@ import sys
 import os
 import gc
 import glob
+import shutil
 from collections import defaultdict
 from typing import Optional, Any
 from .gene_grouping import GeneClustering
@@ -817,3 +819,96 @@ def rescue_low_frep_reads(merged_df, df_dict, args):
         rescued_low_frep_df = pd.DataFrame(columns=['Chr', 'Strand', 'SSC'])
     
     return rescued_low_frep_df
+
+
+def prepare_gz_input(path, temp_dir, file_kind):
+    """If path ends with .gz, gunzip to temp_dir/<basename without .gz>.
+
+    Returns the effective (unzipped) path so downstream readers
+    (pysam.FastaFile, pyfaidx.Fasta, gffutils.create_db) see a plain
+    uncompressed file. Non-.gz paths pass through unchanged.
+
+    Concurrent-safe: writes the unzipped payload to a PID-suffixed temp
+    file inside `temp_dir` and then atomically renames it into place via
+    `os.replace` (POSIX rename, atomic within a single filesystem). This
+    is preferred over flock because NFS 4.1 lockd can leave stale locks
+    on network-partition / node-eviction events, deadlocking all later
+    runs until the lock is manually cleared. Atomic rename has no such
+    state: any reader either sees the previous complete file or the new
+    complete file — never a half-written truncation.
+
+    Idempotent: if the unzipped file already exists, is non-empty, and is
+    no older than the .gz source, no work is done (avoids re-gunziping on
+    re-runs of the same AIDRS invocation in the same output dir).
+
+    Args:
+        path: input path (may be None for optional --gtf_anno).
+        temp_dir: directory to write the unzipped file to. Must exist or
+            be creatable.
+        file_kind: 'fasta' or 'gtf' — used only for logging context.
+
+    Returns:
+        effective path (gunzipped if input was .gz, original otherwise).
+
+    Raises:
+        FileNotFoundError: propagated if path is provided but doesn't exist.
+        OSError: re-raised from gzip or rename if the decompression fails
+            (after the temp file is cleaned up).
+    """
+    if path is None:
+        return None
+    if not path.lower().endswith('.gz'):
+        return path
+    base = os.path.basename(path)
+    # Strip trailing .gz (or .GZ) once.
+    unzipped_name = base[:-3] if base.lower().endswith('.gz') else base
+    out_path = os.path.join(temp_dir, unzipped_name)
+    os.makedirs(temp_dir, exist_ok=True)
+
+    # Idempotency: skip if dest exists, is non-empty, and is no older than source.
+    # The size>0 guard is critical — a crashed prior run could have left a
+    # zero-byte placeholder that mtime alone would treat as valid.
+    if (os.path.exists(out_path)
+            and os.path.getsize(out_path) > 0
+            and os.path.getmtime(out_path) >= os.path.getmtime(path)):
+        logger.info("[GZ INPUT] Reusing cached %s extract: %s", file_kind, out_path)
+        return out_path
+
+    # Disk-space warning: large .gz inputs (e.g. GRCh38 primary assembly
+    # at ~870 MB gz → ~3.0 GB raw) deserve explicit notice before the
+    # decompression lands on whatever volume temp_dir is mounted from.
+    gz_size_mb = os.path.getsize(path) / (1024 * 1024)
+    if gz_size_mb > 1000:
+        logger.warning(
+            "[GZ WARN] %s input is %.0f MB compressed; expect ~3-5x expansion to %s. "
+            "Confirm the mount holding %s has enough free space before this run.",
+            file_kind, gz_size_mb, out_path, temp_dir,
+        )
+
+    # Concurrent-safe write: PID-suffixed temp file + atomic rename.
+    # os.replace is atomic within a single filesystem (per POSIX), so two
+    # concurrent processes racing to gunzip the same .gz will both write
+    # to their own <out_path>.tmp.<pid> and the last finisher's rename
+    # wins; readers never observe a partial file.
+    pid_tmp_path = f"{out_path}.tmp.{os.getpid()}"
+    logger.info("[GZ INPUT] Decompressing %s: %s -> %s", file_kind, path, out_path)
+    try:
+        with gzip.open(path, 'rb') as f_in, open(pid_tmp_path, 'wb') as f_out:
+            shutil.copyfileobj(f_in, f_out, length=4 * 1024 * 1024)  # 4 MB chunks
+            f_out.flush()
+            try:
+                os.fsync(f_out.fileno())
+            except OSError:
+                # fsync may fail on some non-POSIX mounts; not fatal since
+                # the subsequent atomic rename is the durability boundary.
+                pass
+        os.replace(pid_tmp_path, out_path)
+    except Exception:
+        # Best-effort cleanup of the tmp file so we don't leak half-written
+        # data into temp_dir across retries.
+        try:
+            os.remove(pid_tmp_path)
+        except OSError:
+            pass
+        raise
+    return out_path

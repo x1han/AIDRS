@@ -28,6 +28,7 @@ from .common import *
 from .consensus import ConsensusFilter
 from .gene_grouping import GeneClustering, SINGLE_EXON_GROUP_SENTINEL
 from .isoform_classify import IsoformClassifier
+from .aidrs_runtime.resource_guard import ResourceGuard
 from .remove_lowConfidence_junction import SpliceConsensusFilter
 from .SSC_graph_filter import SSCGraphFilter
 from .ISM_filter import TruncationProcessor
@@ -269,7 +270,21 @@ def isoform_validating(df, args, ref_anno=None):
         logger.info(f"Functional annotation skipped. Annotated {len(df)} SSC records.")
     else:
         logger.info("Stage 2.4: Performing TranslationAI ORF prediction and NMD assessment...")
-        transai = TranslationAI_ORF(genome=args.reference, tmp_path=f"{args.output}/temp", translationai_score_threshold=args.translationai_score_threshold, num_processes=args.threads)
+        # Pass actual BAM size to TranslationAI_ORF so ResourceGuard can
+        # reserve appropriate headroom for very large BAMs (>8 GB).
+        bam_size_gb = 4.0
+        if args.bam:
+            try:
+                bam_size_gb = os.path.getsize(args.bam[0]) / (1024 ** 3)
+            except OSError:
+                pass
+        transai = TranslationAI_ORF(
+            genome=args.reference,
+            tmp_path=f"{args.output}/temp",
+            translationai_score_threshold=args.translationai_score_threshold,
+            num_processes=args.threads,
+            bam_size_gb=bam_size_gb,
+        )
         transai.orf_predict_by_translationai(df)
         df = transai.aggr_translationai_result(df, f'{args.output}/temp/TranslationAI_temp')
         logger.info(f"Functional annotation completed. Annotated {len(df)} SSC records.")
@@ -466,7 +481,8 @@ def parse_args(cmd_args):
 
     # === Core pipeline ===
     core = parser.add_argument_group("Core pipeline")
-    core.add_argument("--threads", "-t", type=int, default=4, help="Worker processes. Default: 4")
+    core.add_argument("--threads", "-t", type=int, default=None,
+        help="Worker processes. Default: auto-detect from SGE NSLOTS / Slurm / host (capped at 8).")
     core.add_argument("--keep_temp", action="store_true", help="Keep temp/*.ssc intermediate files.")
     core.add_argument("--filter_freq", type=float, default=5, help="Min read support to retain an SSC (Stage 1.2). Default: 5")
 
@@ -546,10 +562,45 @@ def parse_args(cmd_args):
 
 def main(cmd_args):
     args = parse_args(cmd_args)
+
+    # Auto-derive --threads from scheduler env / host cpus if not set by
+    # the user. This makes `aidrs` safe to invoke without specifying -t
+    # under SGE / Slurm / bare metal.
+    args.threads = ResourceGuard.get_effective_cpu_threads(args.threads)
+
     os.makedirs(args.output, exist_ok=True)
     os.makedirs(os.path.join(args.output, "temp"), exist_ok=True)
     logger = setup_logger(args.output)
     logger.info("=== AIDRS pipeline started === ")
+
+    # GZ-aware input preparation: if user passed --reference or --gtf_anno as
+    # .gz files, gunzip to temp_dir/<basename without .gz> so all downstream
+    # readers (pysam.FastaFile, pyfaidx.Fasta, gffutils.create_db) see a
+    # plain uncompressed file. Override args.* in-place so chrom_check,
+    # bam2ssc, run_Ref2SSC, report_writers, and protein_coding_ability all
+    # transparently read the unzipped paths.
+    temp_dir = os.path.join(args.output, "temp")
+    if args.reference:
+        if not os.path.exists(args.reference):
+            logger.error(f"[FATAL] reference not found: {args.reference}")
+            sys.exit(1)
+        original = args.reference
+        args.reference = prepare_gz_input(args.reference, temp_dir, 'fasta')
+        if args.reference != original:
+            logger.info(f"[GZ] gunzipped reference -> {args.reference}")
+        # pysam.FastaFile does NOT auto-index; pyfaidx does. Build .fai if
+        # missing so downstream FastaFile() calls succeed.
+        if not os.path.exists(args.reference + '.fai'):
+            import pysam as _pysam_faidx
+            _pysam_faidx.faidx(args.reference)
+    if args.gtf_anno:
+        if not os.path.exists(args.gtf_anno):
+            logger.error(f"[FATAL] gtf_anno not found: {args.gtf_anno}")
+            sys.exit(1)
+        original_gtf = args.gtf_anno
+        args.gtf_anno = prepare_gz_input(args.gtf_anno, temp_dir, 'gtf')
+        if args.gtf_anno != original_gtf:
+            logger.info(f"[GZ] gunzipped gtf_anno -> {args.gtf_anno}")
 
     logger.info("[BEGIN_RUN] mode=%s gtf=%s",
                 "de_novo" if args.gtf_anno is None else "reference_guided",
