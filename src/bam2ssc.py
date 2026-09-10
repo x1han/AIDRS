@@ -147,6 +147,7 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
     processed_lines = 0
     written_out1 = 0
     written_out2 = 0
+    has_pt = False  # True iff at least one read had a 'pt' tag (Dorado polyA tail)
 
     with open(out1_tmp, 'w') as out1_fh, pysam.AlignmentFile(bam, 'rb', threads=threads) as bf, pysam.FastaFile(fasta_file) as fa:
         for i, read in enumerate(bf):
@@ -232,6 +233,12 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
             #   =0  = primer anchor found, length inestimable
             #   =-1 = primer anchor NOT found (treat as missing -> 0)
             polya_len = max(0, int(polya_len)) if polya_len is not None else 0
+            # Propagate per-BAM "has any pt tag" so aidrs.py can auto-skip
+            # polyAnnotator on BAMs where basecaller didn't emit polyA info
+            # (e.g. older Dorado). Only set True when we see a real pt tag;
+            # polya_len=0 from "tag missing" must NOT count.
+            if polya_len > 0 or any(t[0] == 'pt' for t in read.tags):
+                has_pt = True
 
             out1_fh.write(f'{read.query_name}.m{id_count[read.query_name]}\t'
                          f'{read.reference_name}\t{strand}\t{s1}\t{e1}\t{str_pos}\t'
@@ -278,7 +285,7 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
             out2_fh.write(f'{ec[k]}\t{k}\t{seq_cache[k]}\n')
             written_out2 += 1
 
-    return out1_tmp, out2_tmp, bam
+    return out1_tmp, out2_tmp, bam, has_pt
 
 
 def get_chrom_offsets(bam):
@@ -377,6 +384,7 @@ def process_bam_chunk_fast(bam, fasta_file, temp_dir, out_dir, threads, chunk_id
     processed_lines = 0
     written_out1 = 0
     written_out2 = 0
+    has_pt = False  # True iff at least one read had a 'pt' tag (Dorado polyA tail)
 
     with open(out1_tmp, 'w') as out1_fh, pysam.AlignmentFile(bam, 'rb', threads=threads) as bf, pysam.FastaFile(fasta_file) as fa:
         for chrom, chrom_start, chrom_end in chrom_jobs:
@@ -467,6 +475,12 @@ def process_bam_chunk_fast(bam, fasta_file, temp_dir, out_dir, threads, chunk_id
 
                 polya_len = next((t[1] for t in read.tags if t[0] == 'pt'), None)
                 polya_len = max(0, int(polya_len)) if polya_len is not None else 0
+                # Propagate per-BAM "has any pt tag" so aidrs.py can auto-skip
+                # polyAnnotator on BAMs where basecaller didn't emit polyA info
+                # (e.g. older Dorado). Only set True when we see a real pt tag;
+                # polya_len=0 from "tag missing" must NOT count.
+                if polya_len > 0 or any(t[0] == 'pt' for t in read.tags):
+                    has_pt = True
 
                 out1_fh.write(f'{read.query_name}.m{id_count[read.query_name]}\t'
                              f'{read.reference_name}\t{strand}\t{s1}\t{e1}\t{str_pos}\t'
@@ -508,16 +522,22 @@ def process_bam_chunk_fast(bam, fasta_file, temp_dir, out_dir, threads, chunk_id
             out2_fh.write(f'{ec[k]}\t{k}\t{seq_cache[k]}\n')
             written_out2 += 1
 
-    return out1_tmp, out2_tmp, bam
+    return out1_tmp, out2_tmp, bam, has_pt
 
 def merge_single_bam(bam, files, out_dir):
+    # files: list of (out1_tmp, out2_tmp, bam, has_pt) tuples from per-chunk workers
     bam_basename = os.path.splitext(os.path.basename(bam))[0]
     out1 = os.path.join(out_dir, f'{bam_basename}_flnc.ssc')
     out2 = os.path.join(out_dir, f'{bam_basename}_ssc.count')
+    # Sentinel file: aidrs.py reads this to decide whether to skip polyAnnotator
+    # end-to-end (no 'pt' tag → all reads had polya_len=0 from missing tag,
+    # so polyA aggregation would just produce all-zero polyA_frac, polluting
+    # downstream Stage 2.6 3-state filter).
+    out_has_polya = os.path.join(out_dir, f'{bam_basename}.has_polya')
 
     out1_count = 0
     with open(out1, 'w') as out1_fh:
-        for out1_tmp, _ in files:
+        for out1_tmp, _, _, _ in files:
             with open(out1_tmp, 'r') as in_fh:
                 for line in in_fh:
                     if not line.endswith('\n'):
@@ -527,7 +547,7 @@ def merge_single_bam(bam, files, out_dir):
 
     global_ec = defaultdict(int)
     global_seq = {}
-    for _, out2_tmp in files:
+    for _, out2_tmp, _, _ in files:
         with open(out2_tmp, 'r') as in_fh:
             for line in in_fh:
                 count, ref, strand, pos_str, ds = line.strip().split('\t', 4)
@@ -541,12 +561,20 @@ def merge_single_bam(bam, files, out_dir):
             out2_fh.write(f'{global_ec[k]}\t{k}\t{global_seq[k]}\n')
             out2_count += 1
 
+    # OR-merge has_pt across chunks: if ANY chunk saw a pt tag, the BAM has polyA.
+    has_pt_any = any(has_pt for _, _, _, has_pt in files)
+    # Write the sentinel file. 'true'/'false' literal so aidrs.py can read it
+    # without ambiguity (vs empty file which could mean "not yet written").
+    with open(out_has_polya, 'w') as fh:
+        fh.write('true\n' if has_pt_any else 'false\n')
+
     return bam, out1_count, out2_count
 
 def merge_results(chunk_results, fasta_file, out_dir, threads):
     bam_groups = defaultdict(list)
-    for out1_tmp, out2_tmp, bam in chunk_results:
-        bam_groups[bam].append((out1_tmp, out2_tmp))
+    # chunk_results: list of (out1_tmp, out2_tmp, bam, has_pt) 4-tuples
+    for out1_tmp, out2_tmp, bam, has_pt in chunk_results:
+        bam_groups[bam].append((out1_tmp, out2_tmp, bam, has_pt))
 
     print(f'[bam2ssc][T1] Pool#2 merge_results enter: workers={threads} groups={len(bam_groups)}', flush=True)
     with mp.Pool(processes=threads) as pool:

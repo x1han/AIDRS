@@ -23,7 +23,8 @@ from .aidrs_runtime.translationai_runner import TranslationAIRunner
 from .aidrs_runtime.concurrency import drain_futures_loud, get_process_pool
 
 class TranslationAI_ORF:
-    def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9, num_processes=None, bam_size_gb=4.0):
+    def __init__(self, genome, tmp_path='temp', translationai_score_threshold=0.9,
+                 num_processes=None, bam_size_gb=4.0, min_orf_count=50):
         # P7 fix: keep the original path string so we can ship it across the
         # multiprocessing pickling boundary (a live pyfaidx.Fasta is a
         # BufferedReader and cannot be pickled).
@@ -31,6 +32,12 @@ class TranslationAI_ORF:
         self.genome = Fasta(genome)
         self.tmp_path = tmp_path
         self.translationai_score_threshold = translationai_score_threshold
+        # Defense 1: minimum number of valid ORFs required before
+        # aggr_translationai_result will return. Below this threshold (with
+        # substantial input) the pipeline raises RuntimeError instead of
+        # silently emitting all-default 'no' values. Pass min_orf_count=0
+        # for legitimate ncRNA-only cohorts.
+        self.min_orf_count = min_orf_count
         from .aidrs_runtime.resource_guard import ResourceGuard
         self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
         # Captured for ResourceGuard.get_safe_translationai_workers so the
@@ -238,7 +245,16 @@ class TranslationAI_ORF:
         # never mixes old _pred* files with new ones. fanout_root itself is
         # the directory aggr_translationai_result is called against;
         # workers nest their per-(Chr, Strand) subdirs inside it.
-        fanout_root = os.path.join(self.tmp_path, "TranslationAI_temp")
+        #
+        # Defense 2: PID-suffixed temp dir. Two concurrent SGE jobs writing
+        # to the same --output dir would otherwise clobber each other's
+        # per-(Chr, Strand) subdirs (e.g., job A's chr1_+ outputs wiped by
+        # job B's rmtree before job A's aggr can read them → silent zero-ORF
+        # output). PID is unique per worker process; the parent process
+        # always sees its own PID so cleanup at line 620 still works.
+        fanout_root = os.path.join(
+            self.tmp_path, f"TranslationAI_temp_{os.getpid()}"
+        )
         shutil.rmtree(fanout_root, ignore_errors=True)
         os.makedirs(fanout_root, exist_ok=True)
 
@@ -281,6 +297,12 @@ class TranslationAI_ORF:
             raise RuntimeError(
                 f"TranslationAI worker pool broken: {e}"
             ) from e
+
+        # Store fanout_root on self so aggr_translationai_result() can walk
+        # the same path even when caller passes the bare "TranslationAI_temp"
+        # dir name (the path is PID-suffixed internally to avoid concurrent
+        # SGE job clobbering — see comment above fanout_root = ...).
+        self.fanout_root = fanout_root
 
     @staticmethod
     def _run_translationai_worker(args):
@@ -614,7 +636,37 @@ class TranslationAI_ORF:
             df[existing_cols] = df[existing_cols].astype('object')
 
         df = TranslationAI_ORF.check_nmd(df, self.translationai_score_threshold)
-        
+
+        # Defense 1: fail-loud assertion against silent zero-ORF output.
+        # If we have substantial input transcripts but TranslationAI produced
+        # zero real ORFs (all rows have TIS_related_location='no' / NMD='no_orf'),
+        # something went catastrophically wrong upstream (race condition, missing
+        # model, broken pool). Without this check the pipeline would happily
+        # write all-defaults assessment.tsv → garbage downstream analysis.
+        # Threshold 50 is generous — legitimate ncRNA cohorts can pass by
+        # using --translationai_min_orf_count 0 to opt out.
+        total_transcripts = len(df)
+        valid_orfs_count = int(
+            (df['TIS_related_location'] != 'no').sum()
+        ) if 'TIS_related_location' in df.columns else 0
+        min_orf_count = getattr(self, 'min_orf_count', 50)
+        if total_transcripts > min_orf_count and valid_orfs_count == 0:
+            logger.error(
+                "[CRITICAL FAIL-LOUD] TranslationAI produced ZERO valid ORFs!\n"
+                "  - Candidate transcripts: %d\n"
+                "  - Valid ORFs (TIS != 'no'): %d\n"
+                "  - Possible causes: temp dir race condition clobbered predORFs,\n"
+                "    TranslationAI model failed to load, or reference genome is wrong.\n"
+                "  - Pipeline ABORTING to prevent silent corruption of downstream analysis.",
+                total_transcripts, valid_orfs_count,
+            )
+            raise RuntimeError(
+                f"TranslationAI fatal: 0 valid ORFs out of {total_transcripts} "
+                f"transcripts (min threshold {min_orf_count}). Pipeline aborted. "
+                f"Pass --translationai_min_orf_count 0 to opt out (only for "
+                f"legitimate ncRNA-only cohorts)."
+            )
+
         # Delete generated temp folder
         import shutil
         if os.path.exists(translationai_out_path):

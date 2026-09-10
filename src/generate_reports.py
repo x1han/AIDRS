@@ -543,7 +543,23 @@ class IsoformAnnotator:
         save_results so that raw_polyA_lengths can be a native
         Arrow List<Float32>. Empty group → polyA_median = NaN
         (NOT 0; 0 means biologically "dead RNA tail").
+
+        When polyA was auto-skipped at Stage 2.3 (no 'pt' tag in any input
+        BAM), df['polyA_frac'] is all-NaN. Returning an empty dict here
+        causes the writer loop in save_results to skip parquet creation
+        entirely — no aidrs.{transcript,gene}_polyA_len.parquet is emitted.
         """
+        # Auto-detected polyA-skip path: bail before scanning flnc_correct.ssc.
+        # The flnc_correct files exist (correct_flnc_only wrote them), but every
+        # row's polyA_len is 0 from the missing 'pt' tag, so aggregating would
+        # produce all-zero tables that are misleading rather than informative.
+        if 'polyA_frac' not in df.columns or df['polyA_frac'].isna().all():
+            logger.warning(
+                "[POLYA-AUTO-SKIP] No polyA_frac data on df; skipping "
+                "aidrs.{transcript,gene}_polyA_len.parquet writes."
+            )
+            return df, {}
+
         pattern = os.path.join(out_dir, 'temp', '*_flnc_correct.ssc')
         files = glob.glob(pattern)
         if not files:

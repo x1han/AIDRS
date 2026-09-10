@@ -23,6 +23,10 @@ import os
 import shutil
 import psutil
 import re
+import json
+import tempfile
+import time
+import atexit
 import pandas as pd
 from .common import *
 from .consensus import ConsensusFilter
@@ -122,6 +126,83 @@ def setup_logger(output_dir):
     sys.excepthook = _uncaught_exception_handler
 
     return logger
+
+
+# ------------------------------------------------------------------------------
+# NativeDirectoryLock: POSIX atomic directory lock for aidrs.py self-defense
+# ------------------------------------------------------------------------------
+# Why: SGE wrapper lock (workspace/scripts/run_aidrs_qsub.sh) prevents concurrent
+# qsub submissions to the same OUT_DIR, but anyone calling `aidrs` directly
+# (Nextflow / Snakemake / local CLI) bypasses the wrapper. NativeDirectoryLock
+# makes aidrs.py self-defensive: it acquires an exclusive lock on the output
+# dir BEFORE any pipeline work, refuses to proceed if the dir is held by
+# another process, and releases on exit (normal + atexit + SIGKILL via os.rmdir
+# leak-detectable on next run).
+#
+# Implementation note: POSIX os.makedirs(..., exist_ok=False) is atomic across
+# processes AND NFS nodes. We write holder.json via tempfile + os.replace so
+# SIGKILL during write leaves no half-truncated JSON. Wrapper lock + app lock
+# form dual-layer defense (per DUALMODE Spec v1.1.0).
+class NativeDirectoryLock:
+    def __init__(self, target_dir):
+        self.target_dir = os.path.abspath(target_dir)
+        self.lock_dir = os.path.join(self.target_dir, ".aidrs_run.lock")
+        self.meta_file = os.path.join(self.lock_dir, "holder.json")
+        self.acquired = False
+
+    def acquire(self):
+        os.makedirs(self.target_dir, exist_ok=True)
+        try:
+            os.makedirs(self.lock_dir, exist_ok=False)
+            self.acquired = True
+            meta = {
+                "job_id": os.environ.get("JOB_ID", "local"),
+                "pid": os.getpid(),
+                "hostname": os.uname().nodename,
+                "start_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.lock_dir, prefix="meta_", suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w") as fh:
+                    json.dump(meta, fh, indent=2)
+                os.replace(tmp_path, self.meta_file)
+            except Exception:
+                # If atomic rename fails, clean up the temp file but keep the lock
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except FileExistsError:
+            holder_info = "unknown holder"
+            if os.path.exists(self.meta_file):
+                try:
+                    with open(self.meta_file) as fh:
+                        holder_info = fh.read().strip()
+                except Exception:
+                    pass
+            logging.getLogger("AIDRS").critical(
+                "\n" + "=" * 80 + "\n"
+                "[CONCURRENCY ERROR] output directory is locked by another AIDRS job!\n"
+                f"target dir:   {self.target_dir}\n"
+                f"lock dir:     {self.lock_dir}\n"
+                f"current holder:\n{holder_info}\n"
+                "Refusing to start to prevent data clobbering. Exiting.\n"
+                + "=" * 80
+            )
+            sys.exit(1)
+
+    def release(self):
+        if not self.acquired:
+            return
+        try:
+            if os.path.exists(self.meta_file):
+                os.remove(self.meta_file)
+            if os.path.exists(self.lock_dir):
+                os.rmdir(self.lock_dir)
+        except Exception as e:
+            logging.getLogger("AIDRS").warning(f"NativeDirectoryLock release non-fatal error: {e}")
+        self.acquired = False
 
 
 def isoform_assembling(bam, args, ref_anno=None):
@@ -316,7 +397,26 @@ def isoform_validating(df, args, ref_anno=None):
 
     logger.info("Stage 2.3: Performing PolyA fraction and length estimation...")
     polyanno = polyAnnotator(args)
-    df = polyanno.anno_polya(df, flnc_paths)
+    # Auto-detect: if NO input BAM had a 'pt' tag (Dorado polyA-tail marker),
+    # bam2ssc wrote all-zero polyA_len → polyA aggregation would produce
+    # polyA_frac=0 for every transcript, polluting Stage 2.6 3-state filter
+    # (would classify everything as State 2 "measured zero" instead of the
+    # correct State 3 "polyA not measured"). Skip the aggregation but still
+    # emit _flnc_correct.ssc because isoform_quantification.py:39 needs it.
+    if getattr(args, '_any_has_polya', True):
+        df = polyanno.anno_polya(df, flnc_paths)
+    else:
+        logger.warning(
+            "[POLYA-AUTO-SKIP] No 'pt' tag detected in ANY of the %d input BAM(s). "
+            "Skipping Stage 2.3 polyA aggregation. df['polyA_frac'] set to NaN (State 3: "
+            "polyA not measured). Stage 2.6 3-state filter will bypass the polyA gate; "
+            "Stage 2.5b polyA pillar will use the genomic intra-priming check (if FASTA "
+            "provided). _flnc_correct.ssc files are still written for isoform_quantification. "
+            "No aidrs.{transcript,gene}_polyA_len.parquet will be produced.",
+            len(args.bam),
+        )
+        polyanno.correct_flnc_only(df, flnc_paths)
+        df['polyA_frac'] = float('nan')  # State 3 sentinel for 3-state filter
 
     if args.no_translationai:
         logger.warning(
@@ -345,9 +445,12 @@ def isoform_validating(df, args, ref_anno=None):
             translationai_score_threshold=args.translationai_score_threshold,
             num_processes=args.threads,
             bam_size_gb=bam_size_gb,
+            min_orf_count=args.translationai_min_orf_count,
         )
         transai.orf_predict_by_translationai(df)
-        df = transai.aggr_translationai_result(df, f'{args.output}/temp/TranslationAI_temp')
+        # Use the PID-suffixed fanout_root set by orf_predict_by_translationai
+        # (defense against concurrent SGE jobs writing to the same --output dir).
+        df = transai.aggr_translationai_result(df, transai.fanout_root)
         logger.info(f"Functional annotation completed. Annotated {len(df)} SSC records.")
 
     logger.info("Stage 2.5: Performing Truncation assessment...")
@@ -595,6 +698,10 @@ def parse_args(cmd_args):
     func.add_argument("--puffin_prediction_threshold", type=float, default=0.02, help="Puffin TSS prediction threshold. Default: 0.02")
     func.add_argument("--polya_fraction_threshold", type=float, default=0.95, help="PolyA fraction threshold for transcript filtering. Default: 0.95")
     func.add_argument("--translationai_score_threshold", type=float, default=0.9, help="TranslationAI TIS/TTS score threshold. Default: 0.9 (ignored when --no_translationai is set)")
+    func.add_argument("--translationai_min_orf_count", type=int, default=50,
+        help="Stage 2.4 fail-loud threshold: minimum valid ORFs required to accept the TranslationAI result. "
+             "If total transcripts > this AND valid ORFs == 0, the pipeline aborts with RuntimeError instead of silently writing TIS/TTS='no' for every row. "
+             "Set to 0 to disable the assertion (legitimate ncRNA-only cohorts). Default: 50")
     func.add_argument("--no_translationai", action="store_true",
         help="Skip Stage 2.4 TranslationAI. Output has TIS/TTS='no' and Predict_NMD='no_orf'; "
              "CDS/UTR annotations in the GTF output will be empty.")
@@ -628,6 +735,13 @@ def main(cmd_args):
     # the user. This makes `aidrs` safe to invoke without specifying -t
     # under SGE / Slurm / bare metal.
     args.threads = ResourceGuard.get_effective_cpu_threads(args.threads)
+
+    # Native directory lock: POSIX atomic guard against concurrent aidrs
+    # invocations on the same --output (DUALMODE Spec v1.1.0 Task 2). Pairs
+    # with the SGE wrapper lock (run_aidrs_qsub.sh) for dual-layer defense.
+    app_lock = NativeDirectoryLock(args.output)
+    app_lock.acquire()
+    atexit.register(app_lock.release)
 
     os.makedirs(args.output, exist_ok=True)
     os.makedirs(os.path.join(args.output, "temp"), exist_ok=True)
@@ -678,6 +792,27 @@ def main(cmd_args):
         output_ssc = os.path.join(args.output, "temp")
         run_bam2ssc(args.reference, args.bam, output_ssc, args.threads)
         logger.info(f"BAM files were converted to SSC format.")
+
+        # Read bam2ssc's per-BAM has_polya sentinel files. Each
+        # {bam}.has_polya contains 'true' if at least one read had a 'pt'
+        # tag (Dorado polyA-tail marker), 'false' otherwise. Used by
+        # Stage 2.3 to auto-skip polyAnnotator when no BAM has polyA.
+        any_has_polya = False
+        for bam in args.bam:
+            sentinel = os.path.join(
+                output_ssc, os.path.splitext(os.path.basename(bam))[0] + ".has_polya"
+            )
+            try:
+                with open(sentinel, "r") as fh:
+                    any_has_polya = any_has_polya or (fh.read().strip() == "true")
+            except FileNotFoundError:
+                # Sentinel missing — treat as no polyA (safer default; matches
+                # older bam2ssc that didn't emit the file).
+                logger.warning(
+                    "[POLYA-AUTO-SKIP] has_polya sentinel missing for %s; "
+                    "assuming no polyA tag.", bam,
+                )
+        args._any_has_polya = any_has_polya
 
         if args.gtf_anno:
             run_Ref2SSC(args.gtf_anno, args.output, args.threads)

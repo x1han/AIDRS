@@ -52,36 +52,19 @@ class polyAnnotator:
     #     df = self.add_polya_frac(df, df_polya)
     #     return df
     
-    def anno_polya(self, df, flnc_files):
-        """Multi-sample polyA annotation
-        
-        Parameters:
-        ----
-        df : pd.DataFrame
-            Dataframe to be annotated
-        flnc_files : list[str]
-            List of multiple flnc.ssc file paths
-            
-        Returns:
-        ----
-        pd.DataFrame
-            Dataframe with added polyA_frac column
-        """
-        # Read and merge all samples' flnc.ssc files
-        # First round flag
-        first_round = True
-        acc_df = pl.DataFrame(
-            schema={
-                "Chr": str,
-                "Strand": str,
-                "SSC": str,
-                "TrStart": int,
-                "TrEnd": int,
-                "polyA_freq": int,
-                "raw_read_freq": int,
-            }
-        )
+    def _correct_flnc_for_files(self, df, flnc_files):
+        """For each flnc_file, run correct_flnc and write {sample}_flnc_correct.ssc.
 
+        The _flnc_correct.ssc files are required by isoform_quantification.py:39
+        for transcript quantification (polyA-independent). They are also the
+        input to polyA_len_profile in generate_reports.py:547.
+
+        Returns a list of (flnc_file, read_df) for downstream consumers that
+        want to do polyA aggregation. Used by both anno_polya (full path) and
+        correct_flnc_only (skip-polyA path, called when bam2ssc reports no 'pt'
+        tag in any input BAM).
+        """
+        results = []
         for flnc_file in flnc_files:
             if not os.path.exists(flnc_file):
                 continue
@@ -103,6 +86,53 @@ class polyAnnotator:
             out_file = os.path.join(dir_name, out_name)
             read_df.to_csv(out_file, sep='\t', index=True, header=False)
 
+            results.append((flnc_file, read_df))
+        return results
+
+    def correct_flnc_only(self, df, flnc_files):
+        """Run only the correct_flnc step + write _flnc_correct.ssc, no polyA aggregation.
+
+        Called by aidrs.py when bam2ssc detects no 'pt' tag in any input BAM.
+        Skipping polyA aggregation prevents all-zero polyA_frac from polluting
+        the downstream Stage 2.6 3-state filter (which would otherwise classify
+        every transcript as State 2 = "measured zero" instead of the correct
+        State 3 = "polyA not measured"). df is returned unchanged; the caller
+        is expected to add df['polyA_frac'] = NaN (State 3) itself.
+        """
+        self._correct_flnc_for_files(df, flnc_files)
+        return df
+
+    def anno_polya(self, df, flnc_files):
+        """Multi-sample polyA annotation
+
+        Parameters:
+        ----
+        df : pd.DataFrame
+            Dataframe to be annotated
+        flnc_files : list[str]
+            List of multiple flnc.ssc file paths
+
+        Returns:
+        ----
+        pd.DataFrame
+            Dataframe with added polyA_frac column
+        """
+        # Read and merge all samples' flnc.ssc files
+        # First round flag
+        first_round = True
+        acc_df = pl.DataFrame(
+            schema={
+                "Chr": str,
+                "Strand": str,
+                "SSC": str,
+                "TrStart": int,
+                "TrEnd": int,
+                "polyA_freq": int,
+                "raw_read_freq": int,
+            }
+        )
+
+        for flnc_file, read_df in self._correct_flnc_for_files(df, flnc_files):
             # Calculate statistics for current file
             cur = (
                 pl.from_pandas(read_df)
@@ -137,14 +167,14 @@ class polyAnnotator:
 
         # Final pandas result
         df_polya = acc_df.to_pandas()
-                
+
         # Perform correction and annotation
         df = self.add_polya_frac(df, df_polya)
-        
+
         # Ensure TrStart and TrEnd columns are of int type
         if 'TrStart' in df.columns:
             df['TrStart'] = df['TrStart'].astype(int)
         if 'TrEnd' in df.columns:
             df['TrEnd'] = df['TrEnd'].astype(int)
-        
+
         return df
