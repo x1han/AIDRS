@@ -531,11 +531,11 @@ class IsoformAnnotator:
 
         Returns:
             (df, dict) where dict keys are:
-              - 'transcript_polyA_len'  → collapsed-across-samples DataFrame
+              - 'transcript.polyA_len'  → collapsed-across-samples DataFrame
                                          (TrID, GeneID, GeneName,
                                           polyA_median, polyA_mean,
                                           polyA_count, raw_polyA_lengths)
-              - 'gene_polyA_len'        → per-gene DataFrame
+              - 'gene.polyA_len'        → per-gene DataFrame
                                          (GeneID, polyA_median, polyA_mean,
                                           polyA_count, raw_polyA_lengths)
 
@@ -547,7 +547,7 @@ class IsoformAnnotator:
         When polyA was auto-skipped at Stage 2.3 (no 'pt' tag in any input
         BAM), df['polyA_frac'] is all-NaN. Returning an empty dict here
         causes the writer loop in save_results to skip parquet creation
-        entirely — no aidrs.{transcript,gene}_polyA_len.parquet is emitted.
+        entirely — no aidrs.{transcript,gene}.polyA_len.parquet is emitted.
         """
         # Auto-detected polyA-skip path: bail before scanning flnc_correct.ssc.
         # The flnc_correct files exist (correct_flnc_only wrote them), but every
@@ -556,7 +556,7 @@ class IsoformAnnotator:
         if 'polyA_frac' not in df.columns or df['polyA_frac'].isna().all():
             logger.warning(
                 "[POLYA-AUTO-SKIP] No polyA_frac data on df; skipping "
-                "aidrs.{transcript,gene}_polyA_len.parquet writes."
+                "aidrs.{transcript,gene}.polyA_len.parquet writes."
             )
             return df, {}
 
@@ -573,8 +573,8 @@ class IsoformAnnotator:
                 columns=['GeneID', 'polyA_median', 'polyA_mean', 'polyA_count']
             )
             return df, {
-                "transcript_polyA_len": empty_tr,
-                "gene_polyA_len": empty_gn,
+                "transcript.polyA_len": empty_tr,
+                "gene.polyA_len": empty_gn,
             }
         reads = []
         for f in files:
@@ -655,6 +655,6 @@ class IsoformAnnotator:
             .to_pandas()
         )
         return df, {
-            "transcript_polyA_len": polyA_tr,
-            "gene_polyA_len": polyA_gn,
+            "transcript.polyA_len": polyA_tr,
+            "gene.polyA_len": polyA_gn,
         }

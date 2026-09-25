@@ -412,7 +412,7 @@ def isoform_validating(df, args, ref_anno=None):
             "polyA not measured). Stage 2.6 3-state filter will bypass the polyA gate; "
             "Stage 2.5b polyA pillar will use the genomic intra-priming check (if FASTA "
             "provided). _flnc_correct.ssc files are still written for isoform_quantification. "
-            "No aidrs.{transcript,gene}_polyA_len.parquet will be produced.",
+            "No aidrs.{transcript,gene}.polyA_len.parquet will be produced.",
             len(args.bam),
         )
         polyanno.correct_flnc_only(df, flnc_paths)
