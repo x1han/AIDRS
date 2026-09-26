@@ -21,3 +21,5 @@ dependencies:
   - polars=1.33
   - gffutils
   - tqdm
+  # test runner (Layer-1 defensive unit + integration tests)
+  - pytest>=8.0
