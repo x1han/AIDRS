@@ -1,0 +1,55 @@
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch when a new push arrives.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-defensive:
+    name: Defensive unit + integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Miniconda with aidrs env
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniconda-version: latest
+          python-version: "3.11"
+          channels: conda-forge,bioconda,defaults
+          channel-priority: flexible
+          environment-file: environment.yml
+          activate-environment: aidrs
+          use-mamba: true
+
+      - name: Show resolved Python + aidrs package
+        shell: bash -l {0}
+        run: |
+          python --version
+          which python
+          python -c "import sys; print('sys.path[0:3]=', sys.path[0:3])"
+
+      - name: Run defensive + integration tests
+        shell: bash -l {0}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          pytest tests/test_defensive.py tests/test_integration.py -v --tb=short --durations=10
+
+      - name: Upload pytest JUnit report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-${{ github.run_id }}
+          path: pytest-report.xml
+          if-no-files-found: ignore
