@@ -33,7 +33,11 @@ roughly 15 minutes for a 30-library delivery.
   `workspace/docs/aidrs_issue_final_plan_2026-11-02.md`
 - The execution report and the expert-panel review:
   `workspace/docs/aidrs_batch12_execution_report_2026-11-02.md`
-- The regression tests for both defects live in
-  `tests/test_defensive.py` (`TestMinExpressedSamplesFilter`,
-  `TestLongFusionGeneId`, `TestTranscriptIdCollision`, `TestIdValidator`,
+- The regression tests for these defects live in `tests/test_defensive.py`
+  (`TestMinExpressedSamplesFilter`, `TestQuantificationFailsLoud`,
+  `TestPartialQuantificationFailsLoud`, `TestPivotAggFunc`,
+  `TestNullGeneKeyFailsLoud`, `TestLongFusionGeneId`,
+  `TestLongFusionSidecarRemoved`, `TestTranscriptIdCollision`,
+  `TestTranscriptIdLengthBudget`, `TestCombineTrids`,
+  `TestTranscript1to1Ordering`, `TestJoinFusedIds`, `TestIdValidator`,
   `TestGeneModelMap`, `TestMatrixDenominators`).

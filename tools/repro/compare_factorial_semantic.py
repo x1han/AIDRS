@@ -20,8 +20,9 @@ Usage::
 
     python tools/repro/compare_factorial_semantic.py <FINAL dir> [<BASE dir>]
 
-``FINAL`` is the output directory of the run under test, ``BASE`` the
-reference it is compared against (default: the unpatched chr1 factorial).
+``FINAL`` is the output directory of the run under test (required), ``BASE``
+the reference it is compared against (optional; defaults to the unpatched
+chr1 factorial of the triage run, which has to exist on disk).
 The exit code is 0 only if every file is byte-identical or float-tolerantly
 equal.
 """
@@ -30,8 +31,10 @@ import sys
 
 import pandas as pd
 
+# The unpatched chr1 factorial used as the reference for this gate.  It is a
+# scratch artefact of the triage run, not part of the repository, so the
+# caller has to point at it explicitly if the default is not present.
 DEFAULT_BASE = "/tmp/aidrs_issue_repro/factorial_unpatched"
-DEFAULT_FINAL = "/tmp/aidrs_issue_repro/factorial_p1r3"
 CASES = ["case1_transAI_polyA", "case2_transAI_noPolyA",
          "case3_noTransAI_polyA", "case4_noTransAI_noPolyA"]
 SKIP = {"aidrs.log"}
@@ -97,8 +100,20 @@ def semantic_diff(pb, pf):
 
 
 def main():
+    if len(sys.argv) < 2:
+        print("usage: compare_factorial_semantic.py <FINAL dir> [<BASE dir>]",
+              file=sys.stderr)
+        print("FATAL: the FINAL directory is required", file=sys.stderr)
+        return 2
+    final = sys.argv[1]
     base = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_BASE
-    final = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_FINAL
+    if not os.path.isdir(final):
+        print(f"FATAL: final directory not found: {final}", file=sys.stderr)
+        return 2
+    if not os.path.isdir(base):
+        print(f"FATAL: base directory not found: {base}\n"
+              f"       pass it as the second argument", file=sys.stderr)
+        return 2
 
     total = same = 0
     rc = 0
