@@ -30,9 +30,8 @@ isolation.
 Extracted from the original ``src/generate_reports.py`` "god class"
 (IsoformAnnotator).
 """
-from typing import Dict, List, Optional
-
 import logging
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
