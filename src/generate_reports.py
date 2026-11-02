@@ -72,43 +72,42 @@ class IsoformAnnotator:
         # Create quantifier with options
         quantifier = IsoformQuantifier(
             num_processes=self.num_processes,
-            min_expressed_samples=min_samples_expr
+            min_expressed_samples=min_samples_expr,
+            allow_partial_quantification=bool(
+                getattr(args, 'allow_partial_quantification', False)
+            ) if args is not None else False
         )
 
-        # Only proceed with quantification if we have sample names
-        quantification_success = False
+        # Only proceed with quantification if we have sample names.
+        # Fail loud: a quantification failure must abort the run. Swallowing it
+        # produced "successful" runs that exited 0 with no
+        # aidrs.{transcript,gene}.{counts,cpm}.tsv at all, which is worse than a
+        # crash — downstream cannot tell a missing matrix from a failed run.
         if sample_names:
-            try:
-                # Quantify all samples
-                quantification_matrices = quantifier.quantify_all_samples(
-                    sample_names,
-                    annotated_df,
-                    output_dir
-                )
+            # Quantify all samples
+            quantification_matrices = quantifier.quantify_all_samples(
+                sample_names,
+                annotated_df,
+                output_dir
+            )
 
-                # Intersect matrices with model
-                # intersect_matrices_with_model returns 3-tuple:
-                #   (filtered_matrices, filtered_transcript_model, filtered_quant_df).
-                # The caller previously unpacked only 2 values → ValueError caught
-                # silently by the outer `except Exception` → count/cpm matrices never
-                # written.
-                (quantification_matrices,
-                 filtered_annotated_df,
-                 _filtered_quant_df) = quantifier.intersect_matrices_with_model(
-                    quantification_matrices, annotated_df
-                )
+            # Intersect matrices with model
+            # intersect_matrices_with_model returns 3-tuple:
+            #   (filtered_matrices, filtered_transcript_model, filtered_quant_df).
+            (quantification_matrices,
+             filtered_annotated_df,
+             _filtered_quant_df) = quantifier.intersect_matrices_with_model(
+                quantification_matrices, annotated_df
+            )
 
-                # Save quantification matrices (consistent dotted naming:
-                # aidrs.{name}.tsv — matches aidrs.transcript.assessment.tsv convention).
-                for name, matrix in quantification_matrices.items():
-                    output_path = os.path.join(output_dir, f'aidrs.{name}.tsv')
-                    matrix.to_csv(output_path, sep='\t')
+            # Save quantification matrices (consistent dotted naming:
+            # aidrs.{name}.tsv — matches aidrs.transcript.assessment.tsv convention).
+            for name, matrix in quantification_matrices.items():
+                output_path = os.path.join(output_dir, f'aidrs.{name}.tsv')
+                matrix.to_csv(output_path, sep='\t')
 
-                # Update annotated_df with the filtered version
-                annotated_df = filtered_annotated_df
-                quantification_success = True
-            except Exception as e:
-                print(f"Warning: Quantification failed: {e}")
+            # Update annotated_df with the filtered version
+            annotated_df = filtered_annotated_df
 
         annotated_df.to_csv(os.path.join(output_dir,
                                          'temp/aidrs.transcript.annotated_df.tsv'),

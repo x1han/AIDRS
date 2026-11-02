@@ -725,6 +725,12 @@ def parse_args(cmd_args):
         help="Fail-loud if any stage (1.2/1.4/1.5/1.8/2.5b/2.6) drops >= fail threshold. Default: False (informational logging only).")
     diag.add_argument("--allow-zero-rows", action="store_true",
         help="Opt out of the hard zero-row invariant in stage_boundary_check. For testing/synthetic data only. Default: False.")
+    diag.add_argument("--allow_partial_quantification", action="store_true",
+        help="Continue the run when a sample fails quantification, excluding the failed "
+             "sample from the count/CPM matrices instead of aborting. The failed samples "
+             "are recorded in <output_dir>/aidrs.quantification_failures.tsv. Default: "
+             "False (fail loud: the run aborts so a silently smaller cohort cannot be "
+             "published).")
 
     args = parser.parse_args(cmd_args)
     return args

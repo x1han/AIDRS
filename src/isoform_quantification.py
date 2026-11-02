@@ -1,4 +1,5 @@
 from collections import defaultdict
+import logging
 import pandas as pd
 import numpy as np
 import os
@@ -7,10 +8,12 @@ import multiprocessing as mp
 from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
 
+logger = logging.getLogger("AIDRS")
 
 
 class IsoformQuantifier:
-    def __init__(self, num_processes=None, min_expressed_samples=1):
+    def __init__(self, num_processes=None, min_expressed_samples=1,
+                 allow_partial_quantification=False):
         """
         Initialize the IsoformQuantifier.
 
@@ -18,10 +21,14 @@ class IsoformQuantifier:
             num_processes (int): Number of processes for parallel processing
                 (None = defer to ResourceGuard: NSLOTS / host cap 8)
             min_expressed_samples (int): Minimum number of samples with expression to retain transcript in count matrix
+            allow_partial_quantification (bool): If True, a sample that fails to
+                quantify is excluded from the matrices instead of aborting the
+                run. Default: False (fail loud).
         """
         from .aidrs_runtime.resource_guard import ResourceGuard
         self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
         self.min_expressed_samples = min_expressed_samples
+        self.allow_partial_quantification = allow_partial_quantification
 
     def quantify_sample(self, sample_name: str, transcript_model_df: pd.DataFrame, output_dir: str) -> pd.DataFrame:
         """
@@ -170,16 +177,41 @@ class IsoformQuantifier:
         """
         # Process each sample with tqdm progress bar
         sample_results = []
+        sample_failures = []
         for sample_name in tqdm(sample_names, desc="Quantifying samples"):
             try:
                 result = self.quantify_sample(sample_name, transcript_model_df, output_dir)
                 sample_results.append(result)
             except Exception as e:
-                print(f"Warning: Failed to quantify sample {sample_name}: {e}")
+                # Fail loud: a sample that cannot be quantified must not silently
+                # vanish from the cohort. It would disappear from the count/CPM
+                # matrices AND from the CPM denominator, leaving a run that
+                # exits 0 with a silently smaller cohort.
+                sample_failures.append((sample_name, e))
+                logger.error(f"[FAIL-LOUD] Failed to quantify sample {sample_name}: "
+                             f"{type(e).__name__}: {e}", exc_info=True)
+                if not self.allow_partial_quantification:
+                    self._write_quantification_failures(output_dir, sample_failures)
+                    raise RuntimeError(
+                        f"Quantification failed for sample '{sample_name}': "
+                        f"{type(e).__name__}: {e}. "
+                        f"Aborting: a partially quantified cohort would silently "
+                        f"drop this sample from the count/CPM matrices and from "
+                        f"the CPM denominator. "
+                        f"Pass --allow_partial_quantification to continue anyway."
+                    ) from e
                 continue
-        
+
         if not sample_results:
             raise ValueError("No samples were successfully quantified")
+
+        if sample_failures:
+            self._write_quantification_failures(output_dir, sample_failures)
+            logger.warning(
+                f"[WARN] {len(sample_failures)}/{len(sample_names)} samples failed "
+                f"quantification and were EXCLUDED from the matrices: "
+                f"{[s for s, _ in sample_failures]}"
+            )
         
         # Combine all sample results
         combined_results = pd.concat(sample_results, ignore_index=True)
@@ -192,7 +224,32 @@ class IsoformQuantifier:
         
         return matrices
 
-    def _generate_quantification_matrices(self, quant_results: pd.DataFrame, 
+    @staticmethod
+    def _write_quantification_failures(output_dir: str,
+                                       sample_failures: List[Tuple[str, Exception]]) -> None:
+        """Persist the per-sample quantification failures to a sidecar TSV.
+
+        Downstream automation needs a file-level record of which samples
+        were dropped, not just a line in the log. Written on both the
+        abort path and the --allow_partial_quantification path.
+
+        Args:
+            output_dir: Run output directory.
+            sample_failures: List of (sample_name, exception) pairs.
+        """
+        if not sample_failures:
+            return
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, 'aidrs.quantification_failures.tsv')
+        df = pd.DataFrame(
+            [(name, type(err).__name__, str(err)) for name, err in sample_failures],
+            columns=['sample_name', 'error_type', 'error_message'],
+        )
+        df.to_csv(path, sep='\t', index=False)
+        logger.error(f"[FAIL-LOUD] Wrote quantification failure record: {path} "
+                     f"({len(df)} failed sample(s))")
+
+    def _generate_quantification_matrices(self, quant_results: pd.DataFrame,
                                          transcript_model_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         """
         Generate count, CPM, and TPM matrices for genes and transcripts.
