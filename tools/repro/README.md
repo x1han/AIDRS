@@ -10,7 +10,7 @@ write into a delivery directory.
 | `id_length_scan.py` | Issue #3 — scans the annotated model for transcript / gene ids over the SAM v1.6 QNAME limit (254 bytes) and for duplicated ids, and shows which source produced the over-long ids. |
 | `cpm_denominator_check.py` | Issue #2 — proves that the transcript and gene CPM matrices of a delivery use the **same** denominator (the library size), so the difference between their column sums comes from the filtered row set, not from different denominators. |
 | `quant_fail_loud_check.py` | The Stage 3 fail-loud path — deletes one sample's `*_flnc_correct.ssc` just before quantification and checks that the run aborts (non-zero exit + `aidrs.quantification_failures.tsv`) unless `--allow_partial_quantification` is passed. |
-| `compare_factorial_semantic.py` | The float-tolerant comparator of the chr1 factorial gate — compares two factorial output trees file by file and, for a file that differs, column-wise (every non-numeric column must be identical, every numeric column must agree within 1e-5). Needed because TranslationAI's float32 inference is not bit-reproducible, so a byte comparison of the TranslationAI assessment tables has a false-positive mode. Usage: `python tools/repro/compare_factorial_semantic.py <FINAL dir> [<BASE dir>]`. |
+| `compare_factorial_semantic.py` | The float-tolerant comparator of the chr1 factorial gate — compares two factorial output trees file by file and, for a file that differs, column-wise (every non-numeric column must be identical, every numeric column must agree within 1e-5 absolute). Needed because TranslationAI's float32 inference is not bit-reproducible, so a byte comparison of the TranslationAI assessment tables has a false-positive mode. It fails loudly on the structural modes too: a case directory missing on either side, or an output file that is present in the base but lost from the run under test, both exit non-zero. Usage: `python tools/repro/compare_factorial_semantic.py <FINAL dir> [<BASE dir>]`. |
 
 ## Usage
 
@@ -40,4 +40,5 @@ roughly 15 minutes for a 30-library delivery.
   `TestLongFusionSidecarRemoved`, `TestTranscriptIdCollision`,
   `TestTranscriptIdLengthBudget`, `TestCombineTrids`,
   `TestTranscript1to1Ordering`, `TestJoinFusedIds`, `TestIdValidator`,
-  `TestGeneModelMap`, `TestMatrixDenominators`).
+  `TestGeneModelMap`, `TestMatrixDenominators`,
+  `TestFactorialComparatorFailsLoud`).
