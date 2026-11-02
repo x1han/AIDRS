@@ -88,7 +88,7 @@ def main() -> int:
     gene_ids = df["GeneID"].astype(str)
     long_genes = gene_ids[gene_ids.str.len() > MAX_GENE_ID_LEN].unique()
     if len(long_genes):
-        print(f"\n=== source of the over-long ids ===")
+        print("\n=== source of the over-long ids ===")
         for g in sorted(long_genes, key=len):
             segments = g.split("_")
             print(f"  GeneID len={len(g):4d}  segments={len(segments):3d}  "
