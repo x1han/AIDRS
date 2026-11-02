@@ -88,7 +88,7 @@ See [Quantification (Counts & CPM)](#quantification-counts--cpm) for what reads 
 ### Optional Output
 
 - `aidrs.transcript.polyA_len.parquet` / `aidrs.gene.polyA_len.parquet`: Poly(A) tail-length sidecars. See [Poly(A) Length Outputs](#polya-length-outputs).
-- `aidrs.novel_cluster_map.tsv`: Source gene ids of every fusion cluster whose gene id had to be shortened (emitted only when such a cluster exists).
+- `aidrs.novel_cluster_map.tsv`: Source gene ids of every fusion cluster whose gene id had to be shortened — either because the gene id itself exceeded 200 bytes, or because the gene id plus the transcript suffix would have exceeded the 254-byte SAM QNAME limit (the `reason` column says which). Emitted only when such a cluster exists.
 - With `--keep_temp`, the full `temp/` directory is preserved, including per-sample `*_flnc_correct.ssc` files (read-level SSC with alignment details).
 
 ---
