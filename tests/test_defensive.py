@@ -868,6 +868,49 @@ class TestLongFusionGeneId:
         assert ids[0] == ids[1] == "NovelGeneCluster_LongFusion_1"
 
 
+class TestLongFusionSidecarOrdering:
+    """The sidecar is the only record of which clusters were renamed.
+
+    It must therefore be on disk BEFORE the identifier validation, so that a
+    fail-loud run keeps its diagnostic.
+    """
+
+    def test_sidecar_is_written_before_the_id_validation(self, tmp_path,
+                                                          monkeypatch):
+        os.makedirs(tmp_path / "temp", exist_ok=True)
+        annotator = IsoformAnnotator(num_processes=1)
+        annotated = pd.DataFrame([
+            {"Chr": "chr1", "Strand": "+", "SSC": "100-200",
+             "TrStart": 100, "TrEnd": 200,
+             "TrID": "X" * (MAX_TRANSCRIPT_ID_LEN + 1),
+             "GeneID": "NovelGeneCluster_LongFusion_1",
+             "GeneName": "NovelGeneCluster_LongFusion_1"},
+        ])
+        monkeypatch.setattr(annotator, "annotate",
+                            lambda df_result, ref_anno, num_processes: annotated)
+        annotator._long_fusion_map = [{
+            "long_fusion_id": "NovelGeneCluster_LongFusion_1",
+            "source_gene_ids": "ENSG00000000001.1",
+            "source_gene_names": "GENE1",
+            "n_source_genes": 1,
+            "original_gene_id": "X" * 300,
+            "original_gene_name": "Y" * 300,
+            "reason": "gene_id_too_long",
+        }]
+        df_result = annotated[["Chr", "Strand", "SSC", "TrStart", "TrEnd"]].copy()
+
+        with pytest.raises(RuntimeError, match="exceed"):
+            annotator.save_results(df_result, str(tmp_path), "ref.fa",
+                                   None, None)
+
+        sidecar = tmp_path / "aidrs.novel_cluster_map.tsv"
+        assert sidecar.exists(), \
+            "the sidecar must be written before the id validation, otherwise a fail-loud run loses its diagnostic"
+        text = sidecar.read_text()
+        assert "NovelGeneCluster_LongFusion_1" in text
+        assert "gene_id_too_long" in text
+
+
 class TestTranscriptIdCollision:
     """update_tr_id must not collapse distinct transcripts onto the same id."""
 
