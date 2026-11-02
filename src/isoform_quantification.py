@@ -279,6 +279,18 @@ class IsoformQuantifier:
                     "gene_tpm": empty_df
                 }
         
+        # Fail loud: a transcript without a gene assignment would silently
+        # disappear from the gene layer (pandas groupby drops NaN keys) while
+        # still consuming reads in the transcript layer, desynchronising the
+        # two CPM denominators.
+        null_keys = quant_results[['TrID', 'GeneID', 'GeneName']].isna().any(axis=1)
+        if bool(null_keys.any()):
+            raise RuntimeError(
+                f"quant_results contains {int(null_keys.sum())} row(s) with a null "
+                f"TrID/GeneID/GeneName; gene-level assignment is ambiguous and the "
+                f"gene matrix would silently drop them."
+            )
+
         # Transcript-level matrices
         transcript_count_matrix = quant_results.pivot_table(
             index=['TrID', 'GeneID', 'GeneName'],
@@ -417,12 +429,13 @@ class IsoformQuantifier:
                 
                 # Set index back if it was a MultiIndex
                 if isinstance(quantification_matrices[name].index, pd.MultiIndex):
-                    # Try to set the same index as original
-                    try:
-                        filtered_matrix = reindexed_matrix_df.set_index(quantification_matrices[name].index.names)
-                    except:
-                        # If that fails, keep as regular index
-                        filtered_matrix = reindexed_matrix_df
+                    # Fail loud: the merge keys are guaranteed present here (this
+                    # branch is only reached when they are), so a failure to
+                    # restore the index is a genuine schema error. Falling back
+                    # to a flat frame would write a TSV with an unnamed index
+                    # column, shifting the column offsets of every downstream
+                    # parser. Crash instead of emitting a malformed file.
+                    filtered_matrix = reindexed_matrix_df.set_index(quantification_matrices[name].index.names)
                 else:
                     # For gene-level matrices, keep the original index structure
                     filtered_matrix = reindexed_matrix_df
@@ -533,21 +546,27 @@ class IsoformQuantifier:
                 else:
                     matrix_df = matrix
                 
-                # Check if matrix has the merge key columns and the same number of rows as count matrix
-                if (all(key in matrix_df.columns for key in merge_keys) and 
-                    len(matrix_df) == len(transcripts_to_keep_mask)):
-                    # Apply the same filtering mask
-                    filtered_matrix_df = matrix_df[transcripts_to_keep_mask].copy()
-                    
+                # Check if matrix has the merge key columns
+                if all(key in matrix_df.columns for key in merge_keys):
+                    # Apply the keep-mask by KEY, never by row position. The previous
+                    # form compared only the row COUNT against the mask length, so a
+                    # matrix that happened to have the same number of rows as the
+                    # transcript matrix would silently receive the transcript mask
+                    # applied positionally -- and the transcript.cpm matrix is built
+                    # by pivot_table, so its row order does NOT match the count
+                    # matrix's model order. Key alignment cannot mis-align.
+                    keep_index = pd.MultiIndex.from_frame(
+                        count_df.loc[transcripts_to_keep_mask.to_numpy(), merge_keys]
+                    )
+                    row_index = pd.MultiIndex.from_frame(matrix_df[merge_keys])
+                    filtered_matrix_df = matrix_df.loc[row_index.isin(keep_index)].copy()
+
                     # Set index back if it was a MultiIndex
                     if isinstance(matrix.index, pd.MultiIndex):
-                        # Try to set the same index as original
-                        try:
-                            filtered_matrix = filtered_matrix_df.set_index(matrix.index.names)
-                            filtered_matrices[name] = filtered_matrix
-                        except:
-                            # If that fails, keep as regular index
-                            filtered_matrices[name] = filtered_matrix_df
+                        # Fail loud: see the note above -- a flat-frame fallback
+                        # would emit a TSV with an unnamed index column.
+                        filtered_matrix = filtered_matrix_df.set_index(matrix.index.names)
+                        filtered_matrices[name] = filtered_matrix
                     else:
                         # For gene-level matrices, keep the original index structure
                         filtered_matrices[name] = filtered_matrix_df
