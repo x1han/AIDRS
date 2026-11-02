@@ -49,6 +49,9 @@ packages = ["aidrs", "translationai"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# the repo root must be importable ("import src") for every test file, not
+# only for those that happen to be imported after tests/test_defensive.py
+pythonpath = ["."]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 python_classes = ["Test*"]
