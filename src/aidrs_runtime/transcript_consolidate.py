@@ -39,7 +39,11 @@ import pandas as pd
 from .column_standardize import build_ref_dict
 from .id_validator import MAX_TRANSCRIPT_ID_LEN, byte_len
 
-logger = logging.getLogger(__name__)
+# The pipeline's logger (src/aidrs.py::setup_logger) wires a console and a
+# file handler to it, so a message logged here lands in aidrs.log -- which is
+# where the operator looks after a failed run. A module-local logger
+# (__name__) would only reach stderr.
+logger = logging.getLogger("AIDRS")
 
 # Maximum length (in bytes) of a GeneID / GeneName before it is replaced by a
 # short aggregate id.  The hard limit for a transcript id is 254 bytes (the
