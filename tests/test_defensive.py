@@ -849,6 +849,7 @@ class TestLongFusionGeneId:
         assert rec["n_source_genes"] == 25
         assert len(rec["source_gene_ids"].split(",")) == 25
         assert "ENSG00000000000.1" in rec["source_gene_ids"]
+        assert rec["reason"] == "gene_id_too_long"
 
     def test_short_cluster_is_not_renamed(self):
         out_map = []
@@ -911,11 +912,17 @@ class TestTranscriptIdLengthBudget:
     by itself guarantee a transcript id within the SAM v1.6 QNAME limit.
     """
 
-    # 9 fused reference genes -> gene id = 19 * 9 + 15 = 186 bytes, i.e.
-    # within MAX_GENE_ID_LEN (200) and therefore NOT shortened by the
-    # gene-id rule. The transcript suffix is what has to push the
-    # composite over the limit.
+    # 9 fused reference genes -> a gene id that stays within
+    # MAX_GENE_ID_LEN (200) and is therefore NOT shortened by the gene-id
+    # rule. The transcript suffix is what has to push the composite over
+    # the limit.
     N_GENES = 9
+
+    @staticmethod
+    def _fused_gene_id(n_genes):
+        """The gene id the _fusion_ref fixture fuses into."""
+        return "NovelGeneCluster_" + "_".join(
+            _fusion_ref(n_genes)["GeneID"].astype(str))
 
     def _rows(self, trids):
         return pd.DataFrame([
@@ -926,6 +933,10 @@ class TestTranscriptIdLengthBudget:
         ])
 
     def test_short_geneid_with_long_suffix_is_shortened(self):
+        # The fixture must produce a gene id that the gene-id rule leaves
+        # alone, otherwise this test would not exercise the transcript-id
+        # trigger at all.
+        assert len(self._fused_gene_id(self.N_GENES)) <= MAX_GENE_ID_LEN
         out_map = []
         out = novel_gene_remapping(
             self._rows(["ENST00000123.2_" + "T" * 80]),
@@ -934,6 +945,11 @@ class TestTranscriptIdLengthBudget:
         assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
         assert out["TrID"].nunique() == len(out)
         assert len(out_map) == 1
+        rec = out_map[0]
+        assert rec["reason"] == "transcript_id_too_long"
+        # The sidecar must keep the ORIGINAL gene id, not the aggregate one.
+        assert rec["original_gene_id"] == self._fused_gene_id(self.N_GENES)
+        assert rec["original_gene_id"] != rec["long_fusion_id"]
 
     def test_collision_fallback_also_respects_the_budget(self):
         # Two rows whose tails are identical collide, so each keeps its full
@@ -955,6 +971,19 @@ class TestTranscriptIdLengthBudget:
             novel_gene_remapping(
                 self._rows(["ENST00000123.2_" + "T" * 240]),
                 _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+
+    def test_already_shortened_gene_id_still_fails_loud(self):
+        # 11 fused genes -> the gene id exceeds MAX_GENE_ID_LEN, so the
+        # gene-id rule shortens it to the 31-byte aggregate. The group
+        # cannot be shortened a second time, and a 230-byte suffix does
+        # not fit anyway -> fail loud.
+        assert len(self._fused_gene_id(11)) > MAX_GENE_ID_LEN
+        out_map = []
+        with pytest.raises(RuntimeError, match="FAIL-LOUD"):
+            novel_gene_remapping(
+                self._rows(["ENST00000123.2_" + "T" * 230]),
+                _fusion_ref(11), 50, long_fusion_map=out_map)
+        assert out_map and out_map[0]["reason"] == "gene_id_too_long"
 
     def test_normal_group_is_not_shortened(self):
         # The common case must stay byte-identical: no shortening, no

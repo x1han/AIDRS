@@ -256,6 +256,7 @@ def _rewrite_transcript_ids(orig_trids: pd.Series, gene_id: str) -> List[str]:
     Returns:
         The rewritten transcript ids, in the order of ``orig_trids``.
     """
+    orig_trids = orig_trids.astype(str)
     has_sep = orig_trids.str.contains('_')
     tails = orig_trids.str.split('_', n=1).str[-1]
 
@@ -263,6 +264,8 @@ def _rewrite_transcript_ids(orig_trids: pd.Series, gene_id: str) -> List[str]:
         f"{gene_id}_{tail}" if sep else gene_id
         for tail, sep in zip(tails, has_sep)
     ]
+    if not candidates:
+        return []
     cand_counts = pd.Series(candidates).value_counts()
     return [
         c if cand_counts[c] == 1 else f"{gene_id}_{o}"
@@ -366,11 +369,12 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                 # it, so the two limits have to be accounted for together.
                 original_gene_id, original_gene_name = gene_id, gene_name
 
-                def _aggregate_id() -> str:
+                def _aggregate_id(reason: str) -> str:
                     """Allocate the next short aggregate id for this group.
 
                     The source gene ids / names are recorded in
                     ``long_fusion_map`` so the association is not lost.
+                    ``reason`` says which limit forced the shortening.
                     """
                     nonlocal long_fusion_index
                     long_fusion_index += 1
@@ -383,6 +387,7 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                             'n_source_genes': len(source_gene_ids),
                             'original_gene_id': original_gene_id,
                             'original_gene_name': original_gene_name,
+                            'reason': reason,
                         })
                     return aggregate_id
 
@@ -393,7 +398,7 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                 # ``long_fusion_map`` so the association is not lost.
                 shortened = False
                 if len(gene_id) > MAX_GENE_ID_LEN or len(gene_name) > MAX_GENE_ID_LEN:
-                    gene_id = gene_name = _aggregate_id()
+                    gene_id = gene_name = _aggregate_id('gene_id_too_long')
                     shortened = True
 
                 # Replace current group's GeneID and GeneName
@@ -409,21 +414,28 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                 # transcript id within the QNAME limit: the suffix
                 # ("_<tail>", or the full original id in the collision
                 # fallback) is added on top of it. Shorten the gene id as
-                # well and recompute.
+                # well and recompute. A group that was ALREADY shortened
+                # cannot be shortened twice, so it fails loud below.
                 if not shortened and max(len(t) for t in new_trids) > MAX_TRANSCRIPT_ID_LEN:
-                    gene_id = gene_name = _aggregate_id()
+                    gene_id = gene_name = _aggregate_id('transcript_id_too_long')
                     group_df['GeneID'] = gene_id
                     group_df['GeneName'] = gene_name
                     new_trids = _rewrite_transcript_ids(orig_trids, gene_id)
 
+                # The length check runs before the duplicate check: a
+                # duplicated id is a collision-resolution bug, an over-long
+                # id is a budget bug, and the budget is the one that cannot
+                # be repaired downstream.
                 over_long = [t for t in new_trids if len(t) > MAX_TRANSCRIPT_ID_LEN]
                 if over_long:
+                    longest = max(len(t) for t in over_long)
                     raise RuntimeError(
                         f"[FAIL-LOUD] {len(over_long)} transcript id(s) of gene "
                         f"'{gene_id}' exceed the {MAX_TRANSCRIPT_ID_LEN}-byte "
-                        f"limit even after shortening the gene id (longest "
-                        f"{max(len(t) for t in over_long)} bytes): "
-                        f"{sorted(set(over_long))[:3]}"
+                        f"limit even after shortening the gene id: the "
+                        f"transcript suffix itself is {longest - len(gene_id) - 1} "
+                        f"bytes (longest id {longest} bytes), so shortening the "
+                        f"gene id cannot help: {sorted(set(over_long))[:3]}"
                     )
 
                 if len(set(new_trids)) != len(new_trids):
