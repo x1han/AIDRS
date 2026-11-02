@@ -122,14 +122,14 @@ class IsoformAnnotator:
                 output_dir,
                 quantification_matrices['transcript.counts'],
                 quantification_matrices['gene.counts'],
-                quantifier._gene_transcript_counts)
+                quantifier.gene_transcript_counts)
             report_writers.write_matrix_denominators(
                 output_dir,
                 quantification_matrices['transcript.counts'],
                 quantification_matrices['transcript.cpm'],
                 quantification_matrices['gene.counts'],
                 quantification_matrices['gene.cpm'],
-                quantifier._library_sizes)
+                quantifier.library_sizes)
 
             # Update annotated_df with the filtered version
             annotated_df = filtered_annotated_df

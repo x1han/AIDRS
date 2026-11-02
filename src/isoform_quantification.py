@@ -34,8 +34,8 @@ class IsoformQuantifier:
         # *unfiltered* quantification, so they are recorded while it is
         # still in hand -- the delivered matrices are filtered and cannot
         # reconstruct them.
-        self._library_sizes: Dict[str, int] = {}
-        self._gene_transcript_counts = pd.DataFrame(
+        self.library_sizes: Dict[str, int] = {}
+        self.gene_transcript_counts = pd.DataFrame(
             columns=['GeneID', 'GeneName', 'n_total_transcripts'])
 
     def quantify_sample(self, sample_name: str, transcript_model_df: pd.DataFrame, output_dir: str) -> pd.DataFrame:
@@ -303,13 +303,13 @@ class IsoformQuantifier:
         # to transcripts in that library. Both CPM layers use it, so it is
         # the scale factor of the whole run. Recorded here because the
         # delivered matrices are filtered and cannot recover it.
-        self._library_sizes = quant_results.groupby(
+        self.library_sizes = quant_results.groupby(
             'sample', observed=True)['count'].sum().astype(int).to_dict()
 
         # Per gene, how many transcripts were quantified (the gene layer is
         # aggregated from all of them, while the transcript model keeps only
         # the ones that passed the expression filter).
-        self._gene_transcript_counts = (
+        self.gene_transcript_counts = (
             quant_results.groupby(['GeneID', 'GeneName'], observed=True)['TrID']
             .nunique().rename('n_total_transcripts').reset_index())
 
