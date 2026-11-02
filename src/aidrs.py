@@ -710,7 +710,9 @@ def parse_args(cmd_args):
     # === Quantification (Stage 3) ===
     quant = parser.add_argument_group("Quantification (Stage 3)")
     quant.add_argument("--min_expressed_samples", type=int, default=1,
-        help="Retain transcripts expressed in >= N samples in the count matrix. Default: 1 (no-op; set >1 for multi-sample consensus filtering).")
+        help="Retain transcripts expressed (count > 0) in at least N of the N libraries. "
+             "The count is over ALL libraries. Default: 1 (retain any transcript with a "
+             "non-zero count in at least one library).")
 
     # === Site correction (advanced) ===
     ss = parser.add_argument_group("Site correction (advanced)")
