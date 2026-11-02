@@ -24,6 +24,7 @@ All tests run in plain Python (aidrs env) — no torch, no real BAM, no selene.
 import os
 import sys
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -58,6 +59,7 @@ from src.single_exon import (
     check_genomic_intra_priming,
 )
 from src.generate_reports import IsoformAnnotator
+from src.isoform_quantification import IsoformQuantifier
 
 
 # =============================================================================
@@ -644,3 +646,150 @@ def test_5_pillar_funnel_integration():
     assert counts["P3_polya_fail"] == 1
     assert counts["P4_low_freq"] == 1
     assert counts["P5_short"] == 1
+
+# ---------------------------------------------------------------------------
+# Stage 3 quantification layer (AIDRS issues #2 / #4)
+# ---------------------------------------------------------------------------
+
+
+def _quant_model():
+    """One-transcript model frame used by the quantification tests."""
+    return pd.DataFrame([
+        {"TrID": "t1", "GeneID": "G1", "GeneName": "A", "Chr": "chr1",
+         "Strand": "+", "SSC": "1-2", "TrStart": 100, "TrEnd": 500},
+    ])
+
+
+def _fake_quantify(sample_name, transcript_model_df, output_dir):
+    """quantify_sample() stand-in: 'bad_sample' always fails."""
+    if sample_name == "bad_sample":
+        raise FileNotFoundError("no ssc file")
+    return pd.DataFrame([{"TrID": "t1", "GeneID": "G1", "GeneName": "A",
+                          "count": 5, "sample": sample_name}])
+
+
+class TestMinExpressedSamplesFilter:
+    """Issue #4: the expression filter must score ALL libraries."""
+
+    def _quant(self, n_libraries, expressed_in):
+        rows = []
+        for i in range(n_libraries):
+            rows.append({"TrID": "t_all", "GeneID": "G_all", "GeneName": "A",
+                         "count": 5, "sample": f"s{i}"})
+        for lib in expressed_in:
+            rows.append({"TrID": "t_first", "GeneID": "G_f", "GeneName": "F",
+                         "count": 9, "sample": f"s{lib}"})
+        return pd.DataFrame(rows)
+
+    def _model(self):
+        return pd.DataFrame([
+            {"TrID": "t_all", "GeneID": "G_all", "GeneName": "A", "Chr": "chr1",
+             "Strand": "+", "SSC": "1-2", "TrStart": 100, "TrEnd": 500},
+            {"TrID": "t_first", "GeneID": "G_f", "GeneName": "F", "Chr": "chr1",
+             "Strand": "+", "SSC": "1-2", "TrStart": 200, "TrEnd": 600},
+        ])
+
+    def test_uses_all_libraries(self):
+        # t_first is expressed in exactly 3 of 9 libraries -> must survive
+        q = IsoformQuantifier(num_processes=1, min_expressed_samples=3)
+        mats = q._generate_quantification_matrices(
+            self._quant(9, [0, 1, 2]), self._model())
+        kept = set(mats["transcript.counts"].index.get_level_values("TrID"))
+        assert "t_first" in kept
+
+    def test_not_a_noop_for_small_library_counts(self):
+        # <= 3 libraries must still apply the threshold
+        q = IsoformQuantifier(num_processes=1, min_expressed_samples=3)
+        mats = q._generate_quantification_matrices(
+            self._quant(2, [0]), self._model())
+        kept = set(mats["transcript.counts"].index.get_level_values("TrID"))
+        assert "t_first" not in kept
+
+    def test_default_is_not_a_noop(self):
+        # default min_expressed_samples=1 must keep a transcript expressed
+        # only in the FIRST library
+        q = IsoformQuantifier(num_processes=1)
+        mats = q._generate_quantification_matrices(
+            self._quant(9, [0]), self._model())
+        kept = set(mats["transcript.counts"].index.get_level_values("TrID"))
+        assert "t_first" in kept
+
+
+class TestQuantificationFailsLoud:
+    """A quantification failure must abort, not silently produce a partial run."""
+
+    def test_quantification_failure_is_not_swallowed(self):
+        src = Path("src/generate_reports.py").read_text()
+        assert "quantification_success" not in src
+        assert "Warning: Quantification failed" not in src
+
+
+class TestPartialQuantificationFailsLoud:
+    """A single failed sample must abort the run by default."""
+
+    def test_single_failure_aborts_by_default(self, tmp_path, monkeypatch):
+        q = IsoformQuantifier(num_processes=1, min_expressed_samples=1)
+        monkeypatch.setattr(q, "quantify_sample", _fake_quantify)
+        with pytest.raises(RuntimeError, match="bad_sample"):
+            q.quantify_all_samples(["good_sample", "bad_sample"],
+                                   _quant_model(), str(tmp_path))
+
+    def test_failure_record_is_written_on_abort(self, tmp_path, monkeypatch):
+        q = IsoformQuantifier(num_processes=1, min_expressed_samples=1)
+        monkeypatch.setattr(q, "quantify_sample", _fake_quantify)
+        with pytest.raises(RuntimeError):
+            q.quantify_all_samples(["good_sample", "bad_sample"],
+                                   _quant_model(), str(tmp_path))
+        rec = tmp_path / "aidrs.quantification_failures.tsv"
+        assert rec.exists()
+        df = pd.read_csv(rec, sep="\t")
+        assert list(df.columns) == ["sample_name", "error_type", "error_message"]
+        assert df["sample_name"].tolist() == ["bad_sample"]
+        assert df["error_type"].tolist() == ["FileNotFoundError"]
+
+    def test_escape_hatch_continues(self, tmp_path, monkeypatch):
+        q = IsoformQuantifier(num_processes=1, min_expressed_samples=1)
+        monkeypatch.setattr(q, "allow_partial_quantification", True, raising=False)
+        monkeypatch.setattr(q, "quantify_sample", _fake_quantify)
+        mats = q.quantify_all_samples(["good_sample", "bad_sample"],
+                                      _quant_model(), str(tmp_path))
+        # the good sample survives, the failed one is absent
+        assert list(mats["transcript.counts"].columns) == ["good_sample"]
+
+    def test_escape_hatch_writes_failure_record(self, tmp_path, monkeypatch):
+        q = IsoformQuantifier(num_processes=1, min_expressed_samples=1)
+        monkeypatch.setattr(q, "allow_partial_quantification", True, raising=False)
+        monkeypatch.setattr(q, "quantify_sample", _fake_quantify)
+        q.quantify_all_samples(["good_sample", "bad_sample"],
+                               _quant_model(), str(tmp_path))
+        rec = tmp_path / "aidrs.quantification_failures.tsv"
+        assert rec.exists()
+        df = pd.read_csv(rec, sep="\t")
+        assert df["sample_name"].tolist() == ["bad_sample"]
+
+
+class TestPivotAggFunc:
+    """The transcript pivots must SUM, not average, duplicate coordinate rows."""
+
+    def test_duplicate_coordinate_rows_are_summed_not_averaged(self):
+        quant = pd.DataFrame([
+            {"TrID": "t1", "GeneID": "G1", "GeneName": "A", "count": 10, "sample": "s1"},
+            {"TrID": "t1", "GeneID": "G1", "GeneName": "A", "count": 30, "sample": "s1"},
+        ])
+        q = IsoformQuantifier(num_processes=1, min_expressed_samples=1)
+        mats = q._generate_quantification_matrices(quant, _quant_model())
+        val = mats["transcript.counts"].iloc[0, 0]
+        assert val == 40, f"expected SUM=40, got {val} (pandas pivot_table defaults to mean=20)"
+
+
+class TestNullGeneKeyFailsLoud:
+    """A null TrID/GeneID/GeneName must abort instead of silently dropping."""
+
+    def test_null_key_raises(self):
+        quant = pd.DataFrame([
+            {"TrID": "t1", "GeneID": "G1", "GeneName": "A", "count": 10, "sample": "s1"},
+            {"TrID": "t2", "GeneID": None, "GeneName": "B", "count": 30, "sample": "s1"},
+        ])
+        q = IsoformQuantifier(num_processes=1, min_expressed_samples=1)
+        with pytest.raises(RuntimeError, match="null"):
+            q._generate_quantification_matrices(quant, _quant_model())
