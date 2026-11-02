@@ -231,8 +231,16 @@ class IsoformQuantifier:
         )
         # Ensure count matrix uses integer type
         transcript_count_matrix = transcript_count_matrix.astype(int)
-        # Apply min_expressed_samples filter
-        transcript_count_matrix = transcript_count_matrix[transcript_count_matrix.iloc[:, 3:].gt(0).sum(axis=1) >= min(transcript_count_matrix.shape[1] - 3, self.min_expressed_samples)]
+        # Apply min_expressed_samples filter over ALL libraries.
+        # The matrix is columned by sample (TrID/GeneID/GeneName are the index),
+        # so the whole frame IS the library set. The previous form scored
+        # iloc[:, 3:] and clamped the threshold to (n_libraries - 3), which
+        # (a) silently ignored the first three libraries and
+        # (b) degenerated into a no-op whenever there were <= 3 libraries.
+        n_libraries = transcript_count_matrix.shape[1]
+        transcript_count_matrix = transcript_count_matrix[
+            transcript_count_matrix.gt(0).sum(axis=1) >= min(n_libraries, self.min_expressed_samples)
+        ]
         
         # Calculate transcript CPM
         transcript_cpm_data = []
