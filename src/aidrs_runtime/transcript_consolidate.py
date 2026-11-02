@@ -32,11 +32,15 @@ Extracted from the original ``src/generate_reports.py`` "god class"
 """
 from typing import Dict, List, Optional
 
+import logging
+
 import numpy as np
 import pandas as pd
 
 from .column_standardize import build_ref_dict
-from .id_validator import MAX_TRANSCRIPT_ID_LEN
+from .id_validator import MAX_TRANSCRIPT_ID_LEN, byte_len
+
+logger = logging.getLogger(__name__)
 
 # Maximum length (in bytes) of a GeneID / GeneName before it is replaced by a
 # short aggregate id.  The hard limit for a transcript id is 254 bytes (the
@@ -245,9 +249,9 @@ def _rewrite_transcript_ids(orig_trids: pd.Series, gene_id: str) -> List[str]:
     and would produce the SAME TrID. Rows whose candidate collides keep
     their full original id, which is unique within the frame.
 
-    The length of the result is ``len(gene_id) + 1 + len(suffix)``; the
-    suffix is unbounded, so a gene id within ``MAX_GENE_ID_LEN`` does not
-    by itself guarantee a transcript id within the QNAME limit.
+    The length of the result is ``byte_len(gene_id) + 1 + byte_len(suffix)``;
+    the suffix is unbounded, so a gene id within ``MAX_GENE_ID_LEN`` does
+    not by itself guarantee a transcript id within the QNAME limit.
 
     Args:
         orig_trids: The group's original transcript ids.
@@ -264,8 +268,6 @@ def _rewrite_transcript_ids(orig_trids: pd.Series, gene_id: str) -> List[str]:
         f"{gene_id}_{tail}" if sep else gene_id
         for tail, sep in zip(tails, has_sep)
     ]
-    if not candidates:
-        return []
     cand_counts = pd.Series(candidates).value_counts()
     return [
         c if cand_counts[c] == 1 else f"{gene_id}_{o}"
@@ -362,11 +364,14 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                     gene_id = 'NovelGeneCluster_' + '_'.join(source_gene_ids)
                     gene_name = 'NovelGeneCluster_' + '_'.join(source_gene_names)
 
-                # The gene id and the transcript id share ONE budget: both
-                # end up as reference names in the BAM/FASTQ, and SAM v1.6
-                # caps QNAME at 254 bytes. The gene id is a prefix of the
-                # transcript id, and the transcript suffix is added on top of
-                # it, so the two limits have to be accounted for together.
+                # The gene id and the transcript id share ONE budget: the
+                # transcript id becomes the reference name (RNAME) of the
+                # model FASTA / BAM, and SAM v1.6 caps QNAME at 254 bytes.
+                # The gene id is the prefix of every transcript id of the
+                # group and the transcript suffix is added on top of it, so
+                # the two limits have to be accounted for together. (The gene
+                # id itself is only a GTF attribute, but it consumes part of
+                # the transcript id's budget.)
                 original_gene_id, original_gene_name = gene_id, gene_name
 
                 def _aggregate_id(reason: str) -> str:
@@ -391,13 +396,15 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                         })
                     return aggregate_id
 
-                # An over-long gene id / gene name must not be emitted: it ends
-                # up as a reference name in the BAM/FASTQ and would exceed the
-                # SAM v1.6 QNAME limit of 254 bytes. Replace it with a short
-                # deterministic aggregate id and keep the source list in
-                # ``long_fusion_map`` so the association is not lost.
+                # An over-long gene id / gene name must not be emitted: it is
+                # the prefix of every transcript id of the group, so it would
+                # push them over the SAM v1.6 QNAME limit of 254 bytes.
+                # Replace it with a short deterministic aggregate id and keep
+                # the source list in ``long_fusion_map`` so the association
+                # is not lost.
                 shortened = False
-                if len(gene_id) > MAX_GENE_ID_LEN or len(gene_name) > MAX_GENE_ID_LEN:
+                if (byte_len(gene_id) > MAX_GENE_ID_LEN
+                        or byte_len(gene_name) > MAX_GENE_ID_LEN):
                     gene_id = gene_name = _aggregate_id('gene_id_too_long')
                     shortened = True
 
@@ -415,28 +422,36 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                 # ("_<tail>", or the full original id in the collision
                 # fallback) is added on top of it. Shorten the gene id as
                 # well and recompute. A group that was ALREADY shortened
-                # cannot be shortened twice, so it fails loud below.
-                if not shortened and max(len(t) for t in new_trids) > MAX_TRANSCRIPT_ID_LEN:
+                # cannot be shortened twice, so it keeps the aggregate id.
+                if (not shortened
+                        and max(byte_len(t) for t in new_trids) > MAX_TRANSCRIPT_ID_LEN):
                     gene_id = gene_name = _aggregate_id('transcript_id_too_long')
                     group_df['GeneID'] = gene_id
                     group_df['GeneName'] = gene_name
                     new_trids = _rewrite_transcript_ids(orig_trids, gene_id)
 
-                # The length check runs before the duplicate check: a
-                # duplicated id is a collision-resolution bug, an over-long
-                # id is a budget bug, and the budget is the one that cannot
-                # be repaired downstream.
-                over_long = [t for t in new_trids if len(t) > MAX_TRANSCRIPT_ID_LEN]
+                # The part of the transcript id behind the gene id can be so
+                # long that NO gene id can bring the transcript id within
+                # the limit. That is not a hard error here: the transcript
+                # may still be dropped by the expression filter, exactly as
+                # it was before this rule existed, and what is actually
+                # shipped is validated fail loud by ``validate_transcript_ids``
+                # on the FILTERED model. Warn loud so it is never silent.
+                over_long = [t for t in new_trids
+                             if byte_len(t) > MAX_TRANSCRIPT_ID_LEN]
                 if over_long:
-                    longest = max(len(t) for t in over_long)
-                    raise RuntimeError(
-                        f"[FAIL-LOUD] {len(over_long)} transcript id(s) of gene "
-                        f"'{gene_id}' exceed the {MAX_TRANSCRIPT_ID_LEN}-byte "
-                        f"limit even after shortening the gene id: the "
-                        f"transcript suffix itself is {longest - len(gene_id) - 1} "
-                        f"bytes (longest id {longest} bytes), so shortening the "
-                        f"gene id cannot help: {sorted(set(over_long))[:3]}"
-                    )
+                    longest = max(byte_len(t) for t in over_long)
+                    logger.warning(
+                        "[ID-BUDGET] %d transcript id(s) of gene '%s' exceed the "
+                        "%d-byte QNAME limit even after shortening the gene id: "
+                        "everything behind the gene id is %d bytes on its own "
+                        "(longest id %d bytes), so no gene id can bring them "
+                        "within the limit. The ids are kept as they are; if one "
+                        "of them survives the expression filter the run aborts "
+                        "in validate_transcript_ids. Offending ids: %s",
+                        len(over_long), gene_id, MAX_TRANSCRIPT_ID_LEN,
+                        longest - byte_len(gene_id) - 1, longest,
+                        sorted(set(over_long))[:3])
 
                 if len(set(new_trids)) != len(new_trids):
                     raise RuntimeError(

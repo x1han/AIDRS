@@ -965,25 +965,62 @@ class TestTranscriptIdLengthBudget:
         assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
         assert out["TrID"].nunique() == len(out)
 
-    def test_suffix_longer_than_the_budget_fails_loud(self):
+    def test_suffix_longer_than_the_budget_is_not_silently_accepted(self):
+        # Everything behind the gene id is 240 bytes: no gene id can bring
+        # the transcript id within the limit. The remapping must not accept
+        # that silently -- and it must not abort the run either: the
+        # transcript may still be dropped by the expression filter, exactly
+        # as it was before this rule existed. What is shipped is validated
+        # fail loud, so an id that survives the filter aborts there.
         out_map = []
-        with pytest.raises(RuntimeError, match="FAIL-LOUD"):
-            novel_gene_remapping(
-                self._rows(["ENST00000123.2_" + "T" * 240]),
-                _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+        out = novel_gene_remapping(
+            self._rows(["ENST00000123.2_" + "T" * 240]),
+            _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+        assert len(out_map) == 1
+        assert out_map[0]["reason"] == "transcript_id_too_long"
+        assert out["TrID"].str.len().max() > MAX_TRANSCRIPT_ID_LEN
+        with pytest.raises(RuntimeError, match="exceed"):
+            validate_transcript_ids(out)
 
-    def test_already_shortened_gene_id_still_fails_loud(self):
+    def test_already_shortened_gene_id_gets_exactly_one_aggregate_id(self):
         # 11 fused genes -> the gene id exceeds MAX_GENE_ID_LEN, so the
-        # gene-id rule shortens it to the 31-byte aggregate. The group
-        # cannot be shortened a second time, and a 230-byte suffix does
-        # not fit anyway -> fail loud.
+        # gene-id rule shortens it to the aggregate id. The group must NOT
+        # be shortened a second time (a second aggregate id for the same
+        # group would be a bug), and the 230-byte suffix does not fit
+        # anyway -> the id stays over-long and the delivered model is
+        # rejected fail loud.
         assert len(self._fused_gene_id(11)) > MAX_GENE_ID_LEN
         out_map = []
-        with pytest.raises(RuntimeError, match="FAIL-LOUD"):
-            novel_gene_remapping(
-                self._rows(["ENST00000123.2_" + "T" * 230]),
-                _fusion_ref(11), 50, long_fusion_map=out_map)
-        assert out_map and out_map[0]["reason"] == "gene_id_too_long"
+        out = novel_gene_remapping(
+            self._rows(["ENST00000123.2_" + "T" * 230]),
+            _fusion_ref(11), 50, long_fusion_map=out_map)
+        assert len(out_map) == 1
+        assert out_map[0]["long_fusion_id"] == "NovelGeneCluster_LongFusion_1"
+        assert out_map[0]["reason"] == "gene_id_too_long"
+        assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
+        assert out["TrID"].str.len().max() > MAX_TRANSCRIPT_ID_LEN
+        with pytest.raises(RuntimeError, match="exceed"):
+            validate_transcript_ids(out)
+
+    def test_gene_id_budget_is_measured_in_bytes(self):
+        # A gene id of 100 CJK characters is 300 bytes: inside
+        # MAX_GENE_ID_LEN in characters, outside it in bytes, so it has to
+        # be shortened.
+        cjk_gene_id = "中" * 100
+        ref = pd.DataFrame([
+            {"Chr": "chr1", "Strand": "+", "SSC": "100-200",
+             "TrStart": 100, "TrEnd": 200,
+             "GeneID": cjk_gene_id, "GeneName": "名" * 50},
+        ])
+        assert len(cjk_gene_id) <= MAX_GENE_ID_LEN
+        out_map = []
+        out = novel_gene_remapping(
+            self._rows(["NovelGene7_NovelTr0"]), ref, 50,
+            long_fusion_map=out_map)
+        assert len(out_map) == 1
+        assert out_map[0]["reason"] == "gene_id_too_long"
+        assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
+        assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
 
     def test_normal_group_is_not_shortened(self):
         # The common case must stay byte-identical: no shortening, no
@@ -1017,6 +1054,18 @@ class TestIdValidator:
 
     def test_overlong_gene_id_raises(self):
         df = pd.DataFrame({"GeneID": ["g" * (MAX_GENE_ID_LEN + 1)]})
+        with pytest.raises(RuntimeError, match="exceed"):
+            validate_gene_ids(df, max_len=MAX_GENE_ID_LEN)
+
+    def test_transcript_id_length_is_measured_in_bytes(self):
+        # 127 CJK characters are 127 characters but 381 bytes: the QNAME
+        # limit counts bytes, so this id is over the limit.
+        df = pd.DataFrame({"TrID": ["中" * 127]})
+        with pytest.raises(RuntimeError, match="exceed"):
+            validate_transcript_ids(df)
+
+    def test_gene_id_length_is_measured_in_bytes(self):
+        df = pd.DataFrame({"GeneID": ["中" * 100]})   # 300 bytes
         with pytest.raises(RuntimeError, match="exceed"):
             validate_gene_ids(df, max_len=MAX_GENE_ID_LEN)
 

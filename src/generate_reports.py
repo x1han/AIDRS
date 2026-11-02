@@ -152,17 +152,12 @@ class IsoformAnnotator:
         df_result_after_quant.to_csv(os.path.join(output_dir,
                                          'temp/aidrs.transcript.assessment.tsv'),
                             sep='\t', index=False)
-        # ---- 2.5 Identifier validation (fail loud, before anything is written) ----
-        # The transcript id becomes the reference name of the model FASTA/BAM.
-        # An id longer than the SAM v1.6 QNAME limit (254 bytes) is truncated
-        # by some tools and crashes others; a duplicated id merges two
-        # distinct transcripts downstream.
-        validate_transcript_ids(annotated_df, context="annotated model: ")
-        validate_gene_ids(annotated_df, max_len=transcript_consolidate.MAX_GENE_ID_LEN,
-                          context="annotated model: ")
-        # ---- 2.6 Long-fusion sidecar ----
+        # ---- 2.5 Long-fusion sidecar ----
         # Gene ids that were too long were replaced by a short aggregate id;
         # keep the source gene list so the association is not lost.
+        # Written BEFORE the identifier validation on purpose: if the
+        # validation aborts the run, this sidecar is the only record of which
+        # clusters were renamed and why.
         long_fusion_map = getattr(self, '_long_fusion_map', None)
         if long_fusion_map:
             fusion_df = pd.DataFrame(long_fusion_map)
@@ -171,6 +166,15 @@ class IsoformAnnotator:
             logger.info(f"Wrote novel cluster map: "
                         f"{os.path.join(output_dir, 'aidrs.novel_cluster_map.tsv')} "
                         f"({len(fusion_df)} long fusion(s))")
+        # ---- 2.6 Identifier validation (fail loud, before the model is written) ----
+        # The transcript id becomes the reference name of the model FASTA/BAM.
+        # An id longer than the SAM v1.6 QNAME limit (254 bytes) is truncated
+        # by some tools and crashes others; a duplicated id merges two
+        # distinct transcripts downstream.
+        # This runs on the FILTERED model, i.e. on exactly what is shipped.
+        validate_transcript_ids(annotated_df, context="annotated model: ")
+        validate_gene_ids(annotated_df, max_len=transcript_consolidate.MAX_GENE_ID_LEN,
+                          context="annotated model: ")
         # ---- 3. Output GTF ----
         self.to_gtf(annotated_df, output_dir)
         # ---- 4. Output FASTA ----
