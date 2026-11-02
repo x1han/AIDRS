@@ -44,7 +44,9 @@ jobs:
         shell: bash -l {0}
         run: |
           cd "$GITHUB_WORKSPACE"
-          pytest tests/test_defensive.py tests/test_integration.py -v --tb=short --durations=10
+          pytest tests/test_defensive.py tests/test_integration.py \
+                 tests/test_generate_reports_characterization.py \
+                 -v --tb=short --durations=10
 
       - name: Upload pytest JUnit report on failure
         if: failure()
