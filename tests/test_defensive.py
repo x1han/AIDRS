@@ -793,3 +793,134 @@ class TestNullGeneKeyFailsLoud:
         q = IsoformQuantifier(num_processes=1, min_expressed_samples=1)
         with pytest.raises(RuntimeError, match="null"):
             q._generate_quantification_matrices(quant, _quant_model())
+
+
+# ---------------------------------------------------------------------------
+# Identifier hygiene (AIDRS issue #3)
+# ---------------------------------------------------------------------------
+
+from src.aidrs_runtime.transcript_consolidate import (
+    MAX_GENE_ID_LEN,
+    novel_gene_remapping,
+)
+from src.aidrs_runtime.id_validator import (
+    MAX_TRANSCRIPT_ID_LEN,
+    validate_gene_ids,
+    validate_transcript_ids,
+)
+
+
+def _fusion_ref(n_genes):
+    """Reference annotation with n_genes genes all sharing one locus."""
+    return pd.DataFrame([
+        {"Chr": "chr1", "Strand": "+", "SSC": "100-200", "TrStart": 100, "TrEnd": 200,
+         "GeneID": f"ENSG{i:011d}.1", "GeneName": f"GENE{i}"}
+        for i in range(n_genes)
+    ])
+
+
+def _novel_rows(n_tr):
+    return pd.DataFrame([
+        {"TrID": f"NovelGene7_NovelTr{i}", "GeneID": "NovelGene7", "GeneName": "NovelGene7",
+         "Chr": "chr1", "Strand": "+", "SSC": "100-200", "TrStart": 100, "TrEnd": 200}
+        for i in range(n_tr)
+    ])
+
+
+class TestLongFusionGeneId:
+    """An over-long gene id / gene name must be replaced by a short aggregate id."""
+
+    def test_overlong_geneid_becomes_longfusion(self):
+        out_map = []
+        out = novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50,
+                                    long_fusion_map=out_map)
+        assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
+        assert set(out["GeneName"]) == {"NovelGeneCluster_LongFusion_1"}
+        assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
+        assert out["TrID"].nunique() == len(out)
+
+    def test_source_genes_are_preserved_in_the_sidecar(self):
+        out_map = []
+        novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50,
+                             long_fusion_map=out_map)
+        assert len(out_map) == 1
+        rec = out_map[0]
+        assert rec["long_fusion_id"] == "NovelGeneCluster_LongFusion_1"
+        assert rec["n_source_genes"] == 25
+        assert len(rec["source_gene_ids"].split(",")) == 25
+        assert "ENSG00000000000.1" in rec["source_gene_ids"]
+
+    def test_short_cluster_is_not_renamed(self):
+        out_map = []
+        out = novel_gene_remapping(_novel_rows(2), _fusion_ref(2), 50,
+                                   long_fusion_map=out_map)
+        assert out_map == []
+        assert out["GeneID"].iloc[0].startswith("NovelGeneCluster_ENSG")
+
+    def test_longfusion_index_is_deterministic(self):
+        ids = []
+        for _ in range(2):
+            out_map = []
+            novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50,
+                                 long_fusion_map=out_map)
+            ids.append(out_map[0]["long_fusion_id"])
+        assert ids[0] == ids[1] == "NovelGeneCluster_LongFusion_1"
+
+
+class TestTranscriptIdCollision:
+    """update_tr_id must not collapse distinct transcripts onto the same id."""
+
+    def _two_refs(self):
+        return pd.DataFrame([
+            {"Chr": "chr1", "Strand": "+", "SSC": "100-200", "TrStart": 100, "TrEnd": 200,
+             "GeneID": "ENSG00000123.16", "GeneName": "AAA"},
+            {"Chr": "chr1", "Strand": "+", "SSC": "100-200", "TrStart": 100, "TrEnd": 200,
+             "GeneID": "ENSG00000456.17", "GeneName": "BBB"},
+        ])
+
+    def _rows(self, trids):
+        return pd.DataFrame([
+            {"TrID": t, "GeneID": "NovelGene7", "GeneName": "NovelGene7",
+             "Chr": "chr1", "Strand": "+", "SSC": "100-200", "TrStart": 100, "TrEnd": 200}
+            for t in trids
+        ])
+
+    def test_two_altertss_reference_ids_do_not_collide(self):
+        out = novel_gene_remapping(
+            self._rows(["ENST00000123.2_AlterTss", "ENST00000456.2_AlterTss"]),
+            self._two_refs(), 50)
+        assert out["TrID"].nunique() == 2, out["TrID"].tolist()
+
+    def test_two_bare_reference_ids_do_not_collide(self):
+        out = novel_gene_remapping(
+            self._rows(["ENST00000123.2", "ENST00000456.2"]),
+            self._two_refs(), 50)
+        assert out["TrID"].nunique() == 2, out["TrID"].tolist()
+
+    def test_common_case_is_unchanged(self):
+        out = novel_gene_remapping(self._rows(["NovelGene255_NovelTr0"]),
+                                   self._two_refs(), 50)
+        assert out["TrID"].iloc[0].endswith("_NovelTr0")
+
+
+class TestIdValidator:
+    """The emitted identifiers must be validated fail-loud."""
+
+    def test_overlong_transcript_id_raises(self):
+        df = pd.DataFrame({"TrID": ["t" * (MAX_TRANSCRIPT_ID_LEN + 1)]})
+        with pytest.raises(RuntimeError, match="exceed"):
+            validate_transcript_ids(df)
+
+    def test_duplicate_transcript_id_raises(self):
+        df = pd.DataFrame({"TrID": ["t1", "t1"]})
+        with pytest.raises(RuntimeError, match="duplicated"):
+            validate_transcript_ids(df)
+
+    def test_valid_ids_pass(self):
+        df = pd.DataFrame({"TrID": ["t1", "t2"]})
+        validate_transcript_ids(df)
+
+    def test_overlong_gene_id_raises(self):
+        df = pd.DataFrame({"GeneID": ["g" * (MAX_GENE_ID_LEN + 1)]})
+        with pytest.raises(RuntimeError, match="exceed"):
+            validate_gene_ids(df, max_len=MAX_GENE_ID_LEN)

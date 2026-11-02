@@ -30,12 +30,22 @@ isolation.
 Extracted from the original ``src/generate_reports.py`` "god class"
 (IsoformAnnotator).
 """
-from typing import Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from .column_standardize import build_ref_dict
+
+# Maximum length (in bytes) of a GeneID / GeneName before it is replaced by a
+# short aggregate id.  The hard limit for a transcript id is 254 bytes (the
+# SAM v1.6 QNAME limit), and the GeneID is a prefix of the TrID, so a gene id
+# must stay well under that. 200 leaves room for the "_<tail>" suffix that
+# ``update_tr_id`` appends.
+MAX_GENE_ID_LEN = 200
+
+# Prefix of the aggregate id used when a gene id / gene name is too long.
+LONG_FUSION_PREFIX = "NovelGeneCluster_LongFusion_"
 
 
 def update_ref_with_flags(ref_df: pd.DataFrame, terminal_tolerance: int) -> None:
@@ -227,7 +237,8 @@ def map_query_to_ref(query_df: pd.DataFrame, ref_dict: dict) -> pd.DataFrame:
 
 def novel_gene_remapping(df_result: pd.DataFrame,
                          ref_anno: Optional[pd.DataFrame],
-                         terminal_tolerance: int = 50) -> pd.DataFrame:
+                         terminal_tolerance: int = 50,
+                         long_fusion_map: Optional[List[Dict[str, object]]] = None) -> pd.DataFrame:
     """Re-attach NovelGene clusters to closest reference gene by whole-cluster site overlap.
 
     For each gene group whose GeneID contains ``"NovelGene"``, collect
@@ -247,6 +258,10 @@ def novel_gene_remapping(df_result: pd.DataFrame,
         ref_anno: Reference annotation DataFrame; required.
         terminal_tolerance: Accepted for signature compatibility;
                             unused by this function.
+        long_fusion_map: Optional list that is APPENDED TO with one record
+            per over-long gene id that was replaced by a short aggregate id
+            (``NovelGeneCluster_LongFusion_<N>``). Each record keeps the
+            original source gene ids / names so the association is not lost.
 
     Returns:
         New DataFrame with ``GeneID``, ``GeneName``, ``TrID`` updated
@@ -260,6 +275,10 @@ def novel_gene_remapping(df_result: pd.DataFrame,
 
     # Store results for all groups
     updated_groups = []
+    # Deterministic counter for over-long gene ids: groups are visited in
+    # groupby order (sorted by GeneID), so the same input always yields the
+    # same aggregate ids.
+    long_fusion_index = 0
 
     for gid, group_df in df_result.groupby('GeneID'):
         group_df = group_df.copy()  # Avoid modifying original data warnings
@@ -296,24 +315,69 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                 # Concatenate results
                 if len(best_rows) == 1:
                     gene_id, gene_name = best_rows.iloc[0].ref_key.split('_', 1)
+                    source_gene_ids = [gene_id]
+                    source_gene_names = [gene_name]
                 else:
                     parts = best_rows.ref_key.str.split('_', n=1, expand=True)
-                    gene_id = 'NovelGeneCluster_' + '_'.join(parts[0])
-                    gene_name = 'NovelGeneCluster_' + '_'.join(parts[1])
+                    source_gene_ids = list(parts[0])
+                    source_gene_names = list(parts[1])
+                    gene_id = 'NovelGeneCluster_' + '_'.join(source_gene_ids)
+                    gene_name = 'NovelGeneCluster_' + '_'.join(source_gene_names)
+
+                # An over-long gene id / gene name must not be emitted: it ends
+                # up as a reference name in the BAM/FASTQ and would exceed the
+                # SAM v1.6 QNAME limit of 254 bytes. Replace it with a short
+                # deterministic aggregate id and keep the source list in
+                # ``long_fusion_map`` so the association is not lost.
+                if len(gene_id) > MAX_GENE_ID_LEN or len(gene_name) > MAX_GENE_ID_LEN:
+                    long_fusion_index += 1
+                    aggregate_id = f"{LONG_FUSION_PREFIX}{long_fusion_index}"
+                    if long_fusion_map is not None:
+                        long_fusion_map.append({
+                            'long_fusion_id': aggregate_id,
+                            'source_gene_ids': ','.join(source_gene_ids),
+                            'source_gene_names': ','.join(source_gene_names),
+                            'n_source_genes': len(source_gene_ids),
+                            'original_gene_id': gene_id,
+                            'original_gene_name': gene_name,
+                        })
+                    gene_id = aggregate_id
+                    gene_name = aggregate_id
 
                 # Replace current group's GeneID and GeneName
                 group_df['GeneID'] = gene_id
                 group_df['GeneName'] = gene_name
 
-                def update_tr_id(tr_id):
-                    parts = str(tr_id).split('_', 1)
-                    if len(parts) == 2:
-                        return f"{gene_id}_{parts[1]}"
-                    else:
-                        # If there is no underscore, replace with gene_id (or keep original? as needed)
-                        return gene_id
+                # Rewrite the transcript ids. The tail (everything after the
+                # first '_') identifies the transcript only when it is unique
+                # inside this group: two reference transcripts flagged
+                # 'AlterTss', or two bare reference ids, collapse onto the same
+                # candidate and would produce the SAME TrID. Rows whose
+                # candidate collides keep their full original id, which is
+                # unique within the frame.
+                orig_trids = group_df['TrID'].astype(str)
+                has_sep = orig_trids.str.contains('_')
+                tails = orig_trids.str.split('_', n=1).str[-1]
 
-                group_df['TrID'] = group_df['TrID'].apply(update_tr_id)
+                def _candidate(tr_id, tail, sep):
+                    if sep:
+                        return f"{gene_id}_{tail}"
+                    return gene_id
+
+                candidates = [
+                    _candidate(o, t, s) for o, t, s in zip(orig_trids, tails, has_sep)
+                ]
+                cand_counts = pd.Series(candidates).value_counts()
+                new_trids = [
+                    c if cand_counts[c] == 1 else f"{gene_id}_{o}"
+                    for c, o in zip(candidates, orig_trids)
+                ]
+                if len(set(new_trids)) != len(new_trids):
+                    raise RuntimeError(
+                        f"Transcript id rewrite produced duplicates inside gene "
+                        f"'{gene_id}': {sorted(t for t in set(new_trids) if new_trids.count(t) > 1)}"
+                    )
+                group_df['TrID'] = new_trids
 
         # Add to final results regardless of modification
         updated_groups.append(group_df)

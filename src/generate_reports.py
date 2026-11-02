@@ -24,6 +24,8 @@ from .aidrs_runtime import transcript_consolidate
 # High-level report writers (Group C)
 from .aidrs_runtime import report_writers
 
+from .aidrs_runtime.id_validator import validate_transcript_ids, validate_gene_ids
+
 # P0-C: column registry in aidrs_runtime.column_registry centralizes the
 # schema so future stages opt-in new columns without touching
 # generate_reports.py. Order preserves byte-identical output for
@@ -39,6 +41,9 @@ class IsoformAnnotator:
     def __init__(self, num_processes: int = 20, terminal_tolerance: int = 50):
         self.num_processes = num_processes
         self.terminal_tolerance = terminal_tolerance
+        # Source-gene association for every gene id that was replaced by a
+        # short aggregate id (see transcript_consolidate.novel_gene_remapping).
+        self._long_fusion_map: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # 1. Unique external entry point (keeping signature unchanged)
@@ -127,6 +132,25 @@ class IsoformAnnotator:
         df_result_after_quant.to_csv(os.path.join(output_dir,
                                          'temp/aidrs.transcript.assessment.tsv'),
                             sep='\t', index=False)
+        # ---- 2.5 Identifier validation (fail loud, before anything is written) ----
+        # The transcript id becomes the reference name of the model FASTA/BAM.
+        # An id longer than the SAM v1.6 QNAME limit (254 bytes) is truncated
+        # by some tools and crashes others; a duplicated id merges two
+        # distinct transcripts downstream.
+        validate_transcript_ids(annotated_df, context="annotated model: ")
+        validate_gene_ids(annotated_df, max_len=transcript_consolidate.MAX_GENE_ID_LEN,
+                          context="annotated model: ")
+        # ---- 2.6 Long-fusion sidecar ----
+        # Gene ids that were too long were replaced by a short aggregate id;
+        # keep the source gene list so the association is not lost.
+        long_fusion_map = getattr(self, '_long_fusion_map', None)
+        if long_fusion_map:
+            fusion_df = pd.DataFrame(long_fusion_map)
+            fusion_df.to_csv(os.path.join(output_dir, 'aidrs.novel_cluster_map.tsv'),
+                             sep='\t', index=False)
+            logger.info(f"Wrote novel cluster map: "
+                        f"{os.path.join(output_dir, 'aidrs.novel_cluster_map.tsv')} "
+                        f"({len(fusion_df)} long fusion(s))")
         # ---- 3. Output GTF ----
         self.to_gtf(annotated_df, output_dir)
         # ---- 4. Output FASTA ----
@@ -352,9 +376,16 @@ class IsoformAnnotator:
     def _novel_gene_remapping(self, df_result: pd.DataFrame,
                                ref_anno: Optional[pd.DataFrame]) -> pd.DataFrame:
         """Thin shim -> transcript_consolidate.novel_gene_remapping."""
-        return transcript_consolidate.novel_gene_remapping(
-            df_result, ref_anno, self.terminal_tolerance
+        long_fusion_map: list = []
+        result = transcript_consolidate.novel_gene_remapping(
+            df_result, ref_anno, self.terminal_tolerance,
+            long_fusion_map=long_fusion_map,
         )
+        # Keep the source-gene association for every gene id that was
+        # replaced by a short aggregate id, so the fusion is still
+        # recoverable downstream.
+        self._long_fusion_map = long_fusion_map
+        return result
 
     # ------------------------------------------------------------------
     # 3. GTF & FASTA Generation (thin shims delegating to report_writers)
