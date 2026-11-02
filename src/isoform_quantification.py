@@ -284,6 +284,7 @@ class IsoformQuantifier:
             index=['TrID', 'GeneID', 'GeneName'],
             columns='sample',
             values='count',
+            aggfunc='sum',        # explicit: counts mean "reads assigned to this transcript"
             fill_value=0
         )
         # Ensure count matrix uses integer type
@@ -312,6 +313,7 @@ class IsoformQuantifier:
             index=['TrID', 'GeneID', 'GeneName'],
             columns='sample',
             values='CPM',
+            aggfunc='sum',        # explicit: CPMs share one denominator, so they add
             fill_value=0.0
         )
         # Ensure CPM matrix uses float type
