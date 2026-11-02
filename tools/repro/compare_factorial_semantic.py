@@ -12,9 +12,17 @@ This comparator therefore does:
   2. for a file that differs, a column-wise comparison:
        - every non-numeric column must be IDENTICAL (ids, coordinates,
          TIS/TTS locations, NMD calls, ...);
-       - every numeric column must agree within TOL (1e-5 relative to the
-         value, i.e. ~10x the observed 1e-6 inference noise).
+       - every numeric column must agree within TOL (1e-5 ABSOLUTE, i.e.
+         ~10x the observed 1e-6 inference noise).  The scores under test
+         (TIS_score / TTS_score) are bounded in [-1, 1], so an absolute and a
+         relative tolerance coincide there; a relative tolerance would be
+         required if the tool were ever pointed at a count matrix.
 A case passes only if both hold.
+
+The gate also fails loudly on the structural failure modes: a case directory
+that is missing on either side, and a file that is present in BASE but absent
+from FINAL (a lost output).  Files that exist only in FINAL are reported but
+do not fail the gate -- this branch legitimately ADDS output files.
 
 Usage::
 
@@ -23,12 +31,13 @@ Usage::
 ``FINAL`` is the output directory of the run under test (required), ``BASE``
 the reference it is compared against (optional; defaults to the unpatched
 chr1 factorial of the triage run, which has to exist on disk).
-The exit code is 0 only if every file is byte-identical or float-tolerantly
-equal.
+The exit code is 0 only if every case was compared and every file is
+byte-identical or float-tolerantly equal.
 """
 import os
 import sys
 
+import numpy as np
 import pandas as pd
 
 # The unpatched chr1 factorial used as the reference for this gate.  It is a
@@ -74,21 +83,25 @@ def semantic_diff(pb, pf):
         av, bv = a[c].values, b[c].values
         if (av == bv).all():
             continue
-        # try numeric
-        try:
-            x = pd.to_numeric(pd.Series(av), errors="raise").astype(float)
-            y = pd.to_numeric(pd.Series(bv), errors="raise").astype(float)
-        except (ValueError, TypeError):
-            diff_rows = [i for i in range(len(a)) if av[i] != bv[i]]
+        # numeric wherever BOTH sides parse; every other differing cell is a
+        # hard difference.  Coercing per cell (instead of raising on the whole
+        # column) keeps one empty cell from turning a 1e-6 float-noise column
+        # into a "non-numeric values differ" failure.
+        x = pd.to_numeric(pd.Series(av), errors="coerce").to_numpy(float)
+        y = pd.to_numeric(pd.Series(bv), errors="coerce").to_numpy(float)
+        both = ~np.isnan(x) & ~np.isnan(y)
+        hard = (~both) & (av != bv)
+        if hard.any():
+            idx = [int(i) for i in np.flatnonzero(hard)]
             return False, ([f"  column {c}: non-numeric values differ "
-                            f"({len(diff_rows)} rows)"] +
+                            f"({len(idx)} rows)"] +
                            [f"    row {i}: {av[i]!r} != {bv[i]!r}"
-                            for i in diff_rows[:10]])
-        diff = (x - y).abs()
-        worst = float(diff.max())
-        n = int((diff > 0).sum())
+                            for i in idx[:10]])
+        diff = np.abs(x - y)
+        worst = float(diff[both].max()) if both.any() else 0.0
+        n = int(((diff > 0) & both).sum())
         if worst > TOL:
-            rows = [i for i in range(len(a)) if diff.iloc[i] > 0]
+            rows = [int(i) for i in np.flatnonzero(diff > 0)]
             return False, ([f"  column {c}: {n} cells differ, max |diff| = "
                             f"{worst:.3e} > {TOL:.0e}"] +
                            [f"    row {i}: {av[i]} != {bv[i]}"
@@ -116,6 +129,7 @@ def main():
         return 2
 
     total = same = 0
+    compared = 0
     rc = 0
     for case in CASES:
         fb, ff = os.path.join(base, case), os.path.join(final, case)
@@ -124,11 +138,20 @@ def main():
             print("  MISSING final output dir")
             rc = 1
             continue
+        if not os.path.isdir(fb):
+            # a missing BASE case would otherwise be compared against an empty
+            # file list and the case would be skipped silently
+            print("  MISSING base output dir")
+            rc = 1
+            continue
+        compared += 1
         fb_files, ff_files = set(listfiles(fb)), set(listfiles(ff))
         only_base = sorted(fb_files - ff_files)
         only_final = sorted(ff_files - fb_files)
         if only_base:
+            # an output that BASE has and FINAL does not is a LOST output
             print(f"  only in BASE : {only_base}")
+            rc = 1
         if only_final:
             print(f"  only in FINAL: {only_final}   (the new contract sidecars)")
         for rel in sorted(fb_files & ff_files):
@@ -153,7 +176,12 @@ def main():
                 print(f"  DIFFERS    {rel}")
             rc = 1
 
-    print(f"\n==== {same}/{total} files byte-identical or float-tolerantly equal ====")
+    print(f"\n==== {same}/{total} files byte-identical or float-tolerantly equal "
+          f"({compared}/{len(CASES)} cases compared) ====")
+    if compared != len(CASES):
+        print(f"FATAL: {len(CASES) - compared} case(s) were not compared",
+              file=sys.stderr)
+        rc = 1
     return rc
 
 
