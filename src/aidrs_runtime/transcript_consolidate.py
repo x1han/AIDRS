@@ -11,6 +11,11 @@ Functions:
   reference beyond ``terminal_tolerance`` as ``AlterTss`` / ``AlterTes``
   / ``AlterTssTes``; also rewrite TrStart_ref / TrEnd_ref to the query
   coordinates (so downstream stages see the query as the reference).
+- ``combine_trids``: join the reference transcript ids of one group into
+  a single transcript id, replacing an over-long join by a short,
+  order-independent alias.
+- ``join_fused_ids``: join the gene ids / gene names of a fused group,
+  replacing an over-long join by a short, content-hash alias.
 - ``transcript_1to1_processor``: collapse multiple reference rows for
   the same ``uniqueTr`` into a single combined ``TrID``, picking the
   best match by absolute TrStart/TrEnd distance.
@@ -30,8 +35,9 @@ isolation.
 Extracted from the original ``src/generate_reports.py`` "god class"
 (IsoformAnnotator).
 """
+import hashlib
 import logging
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -54,6 +60,90 @@ MAX_GENE_ID_LEN = 200
 
 # Prefix of the aggregate id used when a gene id / gene name is too long.
 LONG_FUSION_PREFIX = "NovelGeneCluster_LongFusion_"
+
+# Maximum length (in bytes) of the reference-side multi-ENST transcript id
+# before it is replaced by a short alias. 200 leaves room for the
+# "_AlterTssTes" flag (12 B) and the "_2" terminal-isoform suffix (2 B)
+# appended later, and stays under the 254-byte SAM QNAME limit.
+MAX_COMBINED_TRID_LEN = 200
+
+# Prefix of the content-hash alias used when a fused gene id / gene name is
+# too long.
+FUSION_GENE_PREFIX = "FusionGene_"
+
+# Prefix of the content-hash alias used when a fused NOVEL gene id / gene
+# name is too long. The "NovelGene" marker has to survive the shortening:
+# ``novel_gene_remapping`` decides whether a group is a novel cluster from
+# ``if 'NovelGene' in gid``.
+NOVEL_FUSION_GENE_PREFIX = "NovelGeneCluster_Fusion_"
+
+
+def combine_trids(trids) -> str:
+    """Join reference transcript ids into one transcript id, bounded in length.
+
+    The join of the reference ids of one group is the transcript id of the
+    group, so it has to fit the SAM v1.6 QNAME budget of 254 bytes. An
+    over-long join is replaced by a short alias derived from a content hash
+    of the SORTED components, so the alias does not depend on the row order
+    of the run (the head of the alias comes from the sorted components too
+    -- a digest alone would not be enough, the head would still carry the
+    row order).
+
+    Args:
+        trids: The transcript ids to join (any iterable of strings).
+
+    Returns:
+        The joined transcript id, or a short alias when the join is too long.
+    """
+    parts = [str(t) for t in trids]
+    joined = '_'.join(parts)
+    if byte_len(joined) <= MAX_COMBINED_TRID_LEN:
+        return joined
+    ordered = sorted(parts)                      # order-independent digest
+    digest = hashlib.sha1('\n'.join(ordered).encode('utf-8')).hexdigest()[:12]
+    head = ordered[0].encode('utf-8')[:100].decode('utf-8', 'ignore')
+    alias = f"{head}_and_{len(ordered) - 1}_more_{digest}"
+    logger.info("[ID-BUDGET] reference transcript id shortened: %s -> %s",
+                joined, alias)
+    return alias
+
+
+def join_fused_ids(values: pd.Series) -> str:
+    """Join the gene ids / gene names of a fused group, bounded in length.
+
+    The join can exceed the 200-byte cap that ``validate_gene_ids``
+    enforces, so an over-long join is replaced by a short alias.
+
+    The alias is derived from a CONTENT hash, not from a counter, because
+    two different loci that fused the SAME reference-gene set share ONE gene
+    id today; a counter would split them into two genes in
+    ``aidrs.gene.counts.tsv`` / ``aidrs.gene.cpm.tsv`` /
+    ``aidrs.gene.model_map.tsv``.
+
+    The alias keeps the literal "NovelGene" when the original had it,
+    because ``novel_gene_remapping`` decides whether a group is a novel
+    cluster from ``if 'NovelGene' in gid`` -- an alias without it would
+    silently stop the group from being re-attached to its reference gene
+    and would change the delivered gene ids AND transcript ids.
+
+    The non-over-long join keeps its component order (sorting it would
+    change the delivered ids); only the ALIAS digest is order-independent.
+
+    Args:
+        values: The gene ids / gene names to join.
+
+    Returns:
+        The joined id, or a short alias when the join is too long.
+    """
+    parts = [str(p) for p in values.astype(str).unique()]
+    joined = '-'.join(parts)
+    if byte_len(joined) <= MAX_GENE_ID_LEN:
+        return joined
+    digest = hashlib.sha1('\n'.join(sorted(parts)).encode('utf-8')).hexdigest()[:12]
+    prefix = NOVEL_FUSION_GENE_PREFIX if 'NovelGene' in joined else FUSION_GENE_PREFIX
+    alias = f"{prefix}{digest}"
+    logger.info("[ID-BUDGET] fused gene id shortened: %s -> %s", joined, alias)
+    return alias
 
 
 def update_ref_with_flags(ref_df: pd.DataFrame, terminal_tolerance: int) -> None:
@@ -119,6 +209,10 @@ def transcript_1to1_processor(uni_tr_mappings: pd.DataFrame,
       TrStart_ref / TrEnd_ref; then call ``update_ref_with_flags`` to
       apply the appropriate AlterTss / AlterTes flag.
 
+    The TrIDs are combined in SORTED order, so the joined id does not
+    depend on the row order of the run; ``combine_trids`` also replaces an
+    over-long join by a short alias.
+
     Args:
         uni_tr_mappings: DataFrame for one uniqueTr (multiple rows
                          possible, e.g. one row per reference TrID).
@@ -142,8 +236,8 @@ def transcript_1to1_processor(uni_tr_mappings: pd.DataFrame,
     if not matching_rows.empty:
         working_df = matching_rows.copy()
 
-        unique_trids = working_df['TrID'].unique()
-        combined_trid = '_'.join(unique_trids)
+        unique_trids = sorted(working_df['TrID'].unique())
+        combined_trid = combine_trids(unique_trids)
         working_df['TrID'] = combined_trid
 
         trstart_ref_value = working_df['TrStart'].iloc[0]
@@ -156,8 +250,8 @@ def transcript_1to1_processor(uni_tr_mappings: pd.DataFrame,
     else:
         working_df = uni_tr_mappings.copy()
 
-        unique_trids = working_df['TrID'].unique()
-        combined_trid = '_'.join(unique_trids)
+        unique_trids = sorted(working_df['TrID'].unique())
+        combined_trid = combine_trids(unique_trids)
         working_df['TrID'] = combined_trid
 
         working_df['TrStart_ref'] = working_df.loc[np.abs(working_df['TrStart_ref'] - working_df['TrStart'].iloc[0]).idxmin(), 'TrStart_ref']
@@ -280,8 +374,7 @@ def _rewrite_transcript_ids(orig_trids: pd.Series, gene_id: str) -> List[str]:
 
 def novel_gene_remapping(df_result: pd.DataFrame,
                          ref_anno: Optional[pd.DataFrame],
-                         terminal_tolerance: int = 50,
-                         long_fusion_map: Optional[List[Dict[str, object]]] = None) -> pd.DataFrame:
+                         terminal_tolerance: int = 50) -> pd.DataFrame:
     """Re-attach NovelGene clusters to closest reference gene by whole-cluster site overlap.
 
     For each gene group whose GeneID contains ``"NovelGene"``, collect
@@ -301,10 +394,6 @@ def novel_gene_remapping(df_result: pd.DataFrame,
         ref_anno: Reference annotation DataFrame; required.
         terminal_tolerance: Accepted for signature compatibility;
                             unused by this function.
-        long_fusion_map: Optional list that is APPENDED TO with one record
-            per over-long gene id that was replaced by a short aggregate id
-            (``NovelGeneCluster_LongFusion_<N>``). Each record keeps the
-            original source gene ids / names so the association is not lost.
 
     Returns:
         New DataFrame with ``GeneID``, ``GeneName``, ``TrID`` updated
@@ -375,36 +464,31 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                 # the two limits have to be accounted for together. (The gene
                 # id itself is only a GTF attribute, but it consumes part of
                 # the transcript id's budget.)
-                original_gene_id, original_gene_name = gene_id, gene_name
+                original_gene_id = gene_id
 
                 def _aggregate_id(reason: str) -> str:
                     """Allocate the next short aggregate id for this group.
 
-                    The source gene ids / names are recorded in
-                    ``long_fusion_map`` so the association is not lost.
-                    ``reason`` says which limit forced the shortening.
+                    The source gene ids / names are logged so the association
+                    is not lost. ``reason`` says which limit forced the
+                    shortening.
                     """
                     nonlocal long_fusion_index
                     long_fusion_index += 1
                     aggregate_id = f"{LONG_FUSION_PREFIX}{long_fusion_index}"
-                    if long_fusion_map is not None:
-                        long_fusion_map.append({
-                            'long_fusion_id': aggregate_id,
-                            'source_gene_ids': ','.join(source_gene_ids),
-                            'source_gene_names': ','.join(source_gene_names),
-                            'n_source_genes': len(source_gene_ids),
-                            'original_gene_id': original_gene_id,
-                            'original_gene_name': original_gene_name,
-                            'reason': reason,
-                        })
+                    logger.info(
+                        "[ID-BUDGET] gene id shortened: %s -> %s (%s), "
+                        "sources=%s, names=%s",
+                        original_gene_id, aggregate_id, reason,
+                        ','.join(source_gene_ids),
+                        ','.join(source_gene_names))
                     return aggregate_id
 
                 # An over-long gene id / gene name must not be emitted: it is
                 # the prefix of every transcript id of the group, so it would
                 # push them over the SAM v1.6 QNAME limit of 254 bytes.
-                # Replace it with a short deterministic aggregate id and keep
-                # the source list in ``long_fusion_map`` so the association
-                # is not lost.
+                # Replace it with a short deterministic aggregate id and log
+                # the source list so the association is not lost.
                 shortened = False
                 if (byte_len(gene_id) > MAX_GENE_ID_LEN
                         or byte_len(gene_name) > MAX_GENE_ID_LEN):

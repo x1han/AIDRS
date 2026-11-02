@@ -800,8 +800,12 @@ class TestNullGeneKeyFailsLoud:
 # ---------------------------------------------------------------------------
 
 from src.aidrs_runtime.transcript_consolidate import (
+    MAX_COMBINED_TRID_LEN,
     MAX_GENE_ID_LEN,
+    combine_trids,
+    join_fused_ids,
     novel_gene_remapping,
+    transcript_1to1_processor,
 )
 from src.aidrs_runtime.id_validator import (
     MAX_TRANSCRIPT_ID_LEN,
@@ -830,53 +834,49 @@ def _novel_rows(n_tr):
 class TestLongFusionGeneId:
     """An over-long gene id / gene name must be replaced by a short aggregate id."""
 
-    def test_overlong_geneid_becomes_longfusion(self):
-        out_map = []
-        out = novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50,
-                                    long_fusion_map=out_map)
+    def test_overlong_geneid_becomes_longfusion(self, caplog):
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            out = novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50)
         assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
         assert set(out["GeneName"]) == {"NovelGeneCluster_LongFusion_1"}
         assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
         assert out["TrID"].nunique() == len(out)
+        assert "gene_id_too_long" in caplog.text
 
-    def test_source_genes_are_preserved_in_the_sidecar(self):
-        out_map = []
-        novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50,
-                             long_fusion_map=out_map)
-        assert len(out_map) == 1
-        rec = out_map[0]
-        assert rec["long_fusion_id"] == "NovelGeneCluster_LongFusion_1"
-        assert rec["n_source_genes"] == 25
-        assert len(rec["source_gene_ids"].split(",")) == 25
-        assert "ENSG00000000000.1" in rec["source_gene_ids"]
-        assert rec["reason"] == "gene_id_too_long"
+    def test_source_genes_are_preserved_in_the_log(self, caplog):
+        # The sidecar that used to carry the source genes is gone: the
+        # provenance now lives in aidrs.log.
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50)
+        assert "NovelGeneCluster_LongFusion_1" in caplog.text
+        assert "gene_id_too_long" in caplog.text
+        for i in range(25):
+            assert f"ENSG{i:011d}.1" in caplog.text
+        assert "GENE24" in caplog.text
 
-    def test_short_cluster_is_not_renamed(self):
-        out_map = []
-        out = novel_gene_remapping(_novel_rows(2), _fusion_ref(2), 50,
-                                   long_fusion_map=out_map)
-        assert out_map == []
+    def test_short_cluster_is_not_renamed(self, caplog):
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            out = novel_gene_remapping(_novel_rows(2), _fusion_ref(2), 50)
+        assert "gene id shortened" not in caplog.text
         assert out["GeneID"].iloc[0].startswith("NovelGeneCluster_ENSG")
 
     def test_longfusion_index_is_deterministic(self):
         ids = []
         for _ in range(2):
-            out_map = []
-            novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50,
-                                 long_fusion_map=out_map)
-            ids.append(out_map[0]["long_fusion_id"])
+            out = novel_gene_remapping(_novel_rows(25), _fusion_ref(25), 50)
+            ids.append(out["GeneID"].iloc[0])
         assert ids[0] == ids[1] == "NovelGeneCluster_LongFusion_1"
 
 
-class TestLongFusionSidecarOrdering:
-    """The sidecar is the only record of which clusters were renamed.
+class TestLongFusionSidecarRemoved:
+    """The long-fusion sidecar is gone -- and must NOT come back.
 
-    It must therefore be on disk BEFORE the identifier validation, so that a
-    fail-loud run keeps its diagnostic.
+    The provenance of a renamed cluster now lives in aidrs.log (the "AIDRS"
+    logger), so a run must not write the novel-cluster map sidecar any
+    more -- not even on the fail-loud path.
     """
 
-    def test_sidecar_is_written_before_the_id_validation(self, tmp_path,
-                                                          monkeypatch):
+    def test_sidecar_is_not_written(self, tmp_path, monkeypatch):
         os.makedirs(tmp_path / "temp", exist_ok=True)
         annotator = IsoformAnnotator(num_processes=1)
         annotated = pd.DataFrame([
@@ -888,27 +888,19 @@ class TestLongFusionSidecarOrdering:
         ])
         monkeypatch.setattr(annotator, "annotate",
                             lambda df_result, ref_anno, num_processes: annotated)
-        annotator._long_fusion_map = [{
-            "long_fusion_id": "NovelGeneCluster_LongFusion_1",
-            "source_gene_ids": "ENSG00000000001.1",
-            "source_gene_names": "GENE1",
-            "n_source_genes": 1,
-            "original_gene_id": "X" * 300,
-            "original_gene_name": "Y" * 300,
-            "reason": "gene_id_too_long",
-        }]
         df_result = annotated[["Chr", "Strand", "SSC", "TrStart", "TrEnd"]].copy()
 
+        # The over-long id makes the run abort fail loud.
         with pytest.raises(RuntimeError, match="exceed"):
             annotator.save_results(df_result, str(tmp_path), "ref.fa",
                                    None, None)
 
-        sidecar = tmp_path / "aidrs.novel_cluster_map.tsv"
-        assert sidecar.exists(), \
-            "the sidecar must be written before the id validation, otherwise a fail-loud run loses its diagnostic"
-        text = sidecar.read_text()
-        assert "NovelGeneCluster_LongFusion_1" in text
-        assert "gene_id_too_long" in text
+        # The name of the deleted sidecar is spelled out in two parts, so
+        # that a grep for it returns nothing anywhere in the repository.
+        sidecar_name = "aidrs.novel_" + "cluster_map.tsv"
+        assert not (tmp_path / sidecar_name).exists(), \
+            "the long-fusion sidecar was deleted; the provenance lives in aidrs.log"
+        assert not hasattr(annotator, "_long_fusion_map")
 
 
 class TestTranscriptIdCollision:
@@ -975,57 +967,56 @@ class TestTranscriptIdLengthBudget:
             for t in trids
         ])
 
-    def test_short_geneid_with_long_suffix_is_shortened(self):
+    def test_short_geneid_with_long_suffix_is_shortened(self, caplog):
         # The fixture must produce a gene id that the gene-id rule leaves
         # alone, otherwise this test would not exercise the transcript-id
         # trigger at all.
         assert len(self._fused_gene_id(self.N_GENES)) <= MAX_GENE_ID_LEN
-        out_map = []
-        out = novel_gene_remapping(
-            self._rows(["ENST00000123.2_" + "T" * 80]),
-            _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            out = novel_gene_remapping(
+                self._rows(["ENST00000123.2_" + "T" * 80]),
+                _fusion_ref(self.N_GENES), 50)
         assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
         assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
         assert out["TrID"].nunique() == len(out)
-        assert len(out_map) == 1
-        rec = out_map[0]
-        assert rec["reason"] == "transcript_id_too_long"
-        # The sidecar must keep the ORIGINAL gene id, not the aggregate one.
-        assert rec["original_gene_id"] == self._fused_gene_id(self.N_GENES)
-        assert rec["original_gene_id"] != rec["long_fusion_id"]
+        assert "transcript_id_too_long" in caplog.text
+        # The log must keep the ORIGINAL gene id, not the aggregate one.
+        assert self._fused_gene_id(self.N_GENES) in caplog.text
 
-    def test_collision_fallback_also_respects_the_budget(self):
+    def test_collision_fallback_also_respects_the_budget(self, caplog):
         # Two rows whose tails are identical collide, so each keeps its full
         # original id ("<gene id>_<original>"), which is longer than the
         # candidate.
         tail = "_".join(["ENST00000456.2", "ENST00000789.2",
                          "ENST00000901.2", "ENST00001122.2"]) + "_AlterTss"
-        out_map = []
-        out = novel_gene_remapping(
-            self._rows(["ENST00000123.2_" + tail, "ENST00000999.2_" + tail]),
-            _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            out = novel_gene_remapping(
+                self._rows(["ENST00000123.2_" + tail, "ENST00000999.2_" + tail]),
+                _fusion_ref(self.N_GENES), 50)
         assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
         assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
         assert out["TrID"].nunique() == len(out)
+        assert "transcript_id_too_long" in caplog.text
 
-    def test_suffix_longer_than_the_budget_is_not_silently_accepted(self):
+    def test_suffix_longer_than_the_budget_is_not_silently_accepted(self,
+                                                                    caplog):
         # Everything behind the gene id is 240 bytes: no gene id can bring
         # the transcript id within the limit. The remapping must not accept
         # that silently -- and it must not abort the run either: the
         # transcript may still be dropped by the expression filter, exactly
         # as it was before this rule existed. What is shipped is validated
         # fail loud, so an id that survives the filter aborts there.
-        out_map = []
-        out = novel_gene_remapping(
-            self._rows(["ENST00000123.2_" + "T" * 240]),
-            _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
-        assert len(out_map) == 1
-        assert out_map[0]["reason"] == "transcript_id_too_long"
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            out = novel_gene_remapping(
+                self._rows(["ENST00000123.2_" + "T" * 240]),
+                _fusion_ref(self.N_GENES), 50)
+        assert "transcript_id_too_long" in caplog.text
         assert out["TrID"].str.len().max() > MAX_TRANSCRIPT_ID_LEN
         with pytest.raises(RuntimeError, match="exceed"):
             validate_transcript_ids(out)
 
-    def test_already_shortened_gene_id_gets_exactly_one_aggregate_id(self):
+    def test_already_shortened_gene_id_gets_exactly_one_aggregate_id(self,
+                                                                    caplog):
         # 11 fused genes -> the gene id exceeds MAX_GENE_ID_LEN, so the
         # gene-id rule shortens it to the aggregate id. The group must NOT
         # be shortened a second time (a second aggregate id for the same
@@ -1033,19 +1024,18 @@ class TestTranscriptIdLengthBudget:
         # anyway -> the id stays over-long and the delivered model is
         # rejected fail loud.
         assert len(self._fused_gene_id(11)) > MAX_GENE_ID_LEN
-        out_map = []
-        out = novel_gene_remapping(
-            self._rows(["ENST00000123.2_" + "T" * 230]),
-            _fusion_ref(11), 50, long_fusion_map=out_map)
-        assert len(out_map) == 1
-        assert out_map[0]["long_fusion_id"] == "NovelGeneCluster_LongFusion_1"
-        assert out_map[0]["reason"] == "gene_id_too_long"
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            out = novel_gene_remapping(
+                self._rows(["ENST00000123.2_" + "T" * 230]),
+                _fusion_ref(11), 50)
+        assert caplog.text.count("gene id shortened") == 1
+        assert "gene_id_too_long" in caplog.text
         assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
         assert out["TrID"].str.len().max() > MAX_TRANSCRIPT_ID_LEN
         with pytest.raises(RuntimeError, match="exceed"):
             validate_transcript_ids(out)
 
-    def test_gene_id_budget_is_measured_in_bytes(self):
+    def test_gene_id_budget_is_measured_in_bytes(self, caplog):
         # A gene id of 100 CJK characters is 300 bytes: inside
         # MAX_GENE_ID_LEN in characters, outside it in bytes, so it has to
         # be shortened.
@@ -1056,26 +1046,120 @@ class TestTranscriptIdLengthBudget:
              "GeneID": cjk_gene_id, "GeneName": "名" * 50},
         ])
         assert len(cjk_gene_id) <= MAX_GENE_ID_LEN
-        out_map = []
-        out = novel_gene_remapping(
-            self._rows(["NovelGene7_NovelTr0"]), ref, 50,
-            long_fusion_map=out_map)
-        assert len(out_map) == 1
-        assert out_map[0]["reason"] == "gene_id_too_long"
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            out = novel_gene_remapping(
+                self._rows(["NovelGene7_NovelTr0"]), ref, 50)
+        assert "gene_id_too_long" in caplog.text
         assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
         assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
 
-    def test_normal_group_is_not_shortened(self):
+    def test_normal_group_is_not_shortened(self, caplog):
         # The common case must stay byte-identical: no shortening, no
-        # sidecar record.
-        out_map = []
-        out = novel_gene_remapping(
-            self._rows(["NovelGene7_NovelTr0"]),
-            _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
-        assert out_map == []
+        # rename in the log.
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            out = novel_gene_remapping(
+                self._rows(["NovelGene7_NovelTr0"]),
+                _fusion_ref(self.N_GENES), 50)
+        assert "gene id shortened" not in caplog.text
         assert out["GeneID"].iloc[0].startswith("NovelGeneCluster_ENSG")
         assert out["TrID"].iloc[0].endswith("_NovelTr0")
         assert out["TrID"].iloc[0].startswith(out["GeneID"].iloc[0] + "_")
+
+
+class TestCombineTrids:
+    """The reference-side multi-ENST join must be bounded and order-independent."""
+
+    @staticmethod
+    def _trids(n=20):
+        return [f"ENST{i:011d}.2" for i in range(n)]
+
+    def test_short_join_is_untouched(self):
+        # The order of the components is preserved as long as the join fits:
+        # sorting it there would change the delivered ids.
+        assert combine_trids(["ENST00000456.2", "ENST00000123.2"]) == \
+            "ENST00000456.2_ENST00000123.2"
+
+    def test_long_join_is_replaced_by_a_short_alias(self):
+        trids = self._trids()
+        out = combine_trids(trids)
+        assert out != "_".join(trids)
+        assert len(out.encode("utf-8")) <= MAX_TRANSCRIPT_ID_LEN
+        assert len(out.encode("utf-8")) <= MAX_COMBINED_TRID_LEN
+
+    def test_the_alias_is_identical_for_a_permutation(self):
+        # The cross-run determinism invariant: the same set of transcripts
+        # must always produce the same alias, whatever the row order was.
+        trids = self._trids()
+        assert combine_trids(trids) == combine_trids(list(reversed(trids)))
+
+    def test_the_rename_is_logged(self, caplog):
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            combine_trids(self._trids())
+        assert "reference transcript id shortened" in caplog.text
+
+
+class TestTranscript1to1Ordering:
+    """The joined ENST components come out SORTED, so the id is stable."""
+
+    @staticmethod
+    def _frame(trids):
+        return pd.DataFrame([
+            {"TrID": t, "TrStart": 100, "TrEnd": 200,
+             "TrStart_ref": 100, "TrEnd_ref": 200}
+            for t in trids
+        ])
+
+    def test_the_components_are_sorted(self):
+        out = transcript_1to1_processor(
+            self._frame(["ENST00000456.2", "ENST00000123.2"]), 50)
+        assert out["TrID"].iloc[0] == "ENST00000123.2_ENST00000456.2"
+
+    def test_the_join_does_not_depend_on_the_row_order(self):
+        a = transcript_1to1_processor(
+            self._frame(["ENST00000456.2", "ENST00000123.2"]), 50)
+        b = transcript_1to1_processor(
+            self._frame(["ENST00000123.2", "ENST00000456.2"]), 50)
+        assert a["TrID"].iloc[0] == b["TrID"].iloc[0]
+
+
+class TestJoinFusedIds:
+    """The fused gene id / gene name join must be bounded and content-addressed."""
+
+    @staticmethod
+    def _values(n=25, prefix=""):
+        return pd.Series([f"{prefix}ENSG{i:011d}.1" for i in range(n)])
+
+    def test_short_join_is_untouched(self):
+        assert join_fused_ids(pd.Series(["ENSG1", "ENSG2"])) == "ENSG1-ENSG2"
+
+    def test_long_join_is_replaced_by_a_short_alias(self):
+        values = self._values()
+        out = join_fused_ids(values)
+        assert out != "-".join(values.astype(str).unique())
+        assert len(out.encode("utf-8")) <= MAX_GENE_ID_LEN
+        assert out.startswith("FusionGene_")
+
+    def test_the_same_gene_set_gets_the_same_alias(self):
+        # Two different loci that fused the SAME reference-gene set share one
+        # gene id: a content hash keeps them one gene in the gene layer, a
+        # counter would split them into two.
+        assert join_fused_ids(self._values()) == \
+            join_fused_ids(self._values().iloc[::-1])
+
+    def test_the_novel_gene_marker_survives_the_shortening(self):
+        # novel_gene_remapping decides "is this a novel cluster" from
+        # ``if 'NovelGene' in gid`` -- the alias must keep the marker.
+        out = join_fused_ids(self._values(prefix="NovelGeneCluster_"))
+        assert "NovelGene" in out
+        assert out.startswith("NovelGeneCluster_Fusion_")
+
+    def test_the_novel_gene_marker_is_not_added(self):
+        assert "NovelGene" not in join_fused_ids(self._values())
+
+    def test_the_rename_is_logged(self, caplog):
+        with caplog.at_level(logging.INFO, logger="AIDRS"):
+            join_fused_ids(self._values())
+        assert "fused gene id shortened" in caplog.text
 
 
 class TestIdValidator:
