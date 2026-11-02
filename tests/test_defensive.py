@@ -903,6 +903,72 @@ class TestTranscriptIdCollision:
         assert out["TrID"].iloc[0].endswith("_NovelTr0")
 
 
+class TestTranscriptIdLengthBudget:
+    """The 254-byte QNAME budget covers the gene id AND the suffix.
+
+    The gene id is a prefix of the transcript id and the transcript suffix
+    is added on top of it, so a gene id within ``MAX_GENE_ID_LEN`` does not
+    by itself guarantee a transcript id within the SAM v1.6 QNAME limit.
+    """
+
+    # 9 fused reference genes -> gene id = 19 * 9 + 15 = 186 bytes, i.e.
+    # within MAX_GENE_ID_LEN (200) and therefore NOT shortened by the
+    # gene-id rule. The transcript suffix is what has to push the
+    # composite over the limit.
+    N_GENES = 9
+
+    def _rows(self, trids):
+        return pd.DataFrame([
+            {"TrID": t, "GeneID": "NovelGene7", "GeneName": "NovelGene7",
+             "Chr": "chr1", "Strand": "+", "SSC": "100-200",
+             "TrStart": 100, "TrEnd": 200}
+            for t in trids
+        ])
+
+    def test_short_geneid_with_long_suffix_is_shortened(self):
+        out_map = []
+        out = novel_gene_remapping(
+            self._rows(["ENST00000123.2_" + "T" * 80]),
+            _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+        assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
+        assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
+        assert out["TrID"].nunique() == len(out)
+        assert len(out_map) == 1
+
+    def test_collision_fallback_also_respects_the_budget(self):
+        # Two rows whose tails are identical collide, so each keeps its full
+        # original id ("<gene id>_<original>"), which is longer than the
+        # candidate.
+        tail = "_".join(["ENST00000456.2", "ENST00000789.2",
+                         "ENST00000901.2", "ENST00001122.2"]) + "_AlterTss"
+        out_map = []
+        out = novel_gene_remapping(
+            self._rows(["ENST00000123.2_" + tail, "ENST00000999.2_" + tail]),
+            _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+        assert set(out["GeneID"]) == {"NovelGeneCluster_LongFusion_1"}
+        assert out["TrID"].str.len().max() <= MAX_TRANSCRIPT_ID_LEN
+        assert out["TrID"].nunique() == len(out)
+
+    def test_suffix_longer_than_the_budget_fails_loud(self):
+        out_map = []
+        with pytest.raises(RuntimeError, match="FAIL-LOUD"):
+            novel_gene_remapping(
+                self._rows(["ENST00000123.2_" + "T" * 240]),
+                _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+
+    def test_normal_group_is_not_shortened(self):
+        # The common case must stay byte-identical: no shortening, no
+        # sidecar record.
+        out_map = []
+        out = novel_gene_remapping(
+            self._rows(["NovelGene7_NovelTr0"]),
+            _fusion_ref(self.N_GENES), 50, long_fusion_map=out_map)
+        assert out_map == []
+        assert out["GeneID"].iloc[0].startswith("NovelGeneCluster_ENSG")
+        assert out["TrID"].iloc[0].endswith("_NovelTr0")
+        assert out["TrID"].iloc[0].startswith(out["GeneID"].iloc[0] + "_")
+
+
 class TestIdValidator:
     """The emitted identifiers must be validated fail-loud."""
 

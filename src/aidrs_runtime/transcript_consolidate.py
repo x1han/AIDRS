@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 
 from .column_standardize import build_ref_dict
+from .id_validator import MAX_TRANSCRIPT_ID_LEN
 
 # Maximum length (in bytes) of a GeneID / GeneName before it is replaced by a
 # short aggregate id.  The hard limit for a transcript id is 254 bytes (the
@@ -235,6 +236,40 @@ def map_query_to_ref(query_df: pd.DataFrame, ref_dict: dict) -> pd.DataFrame:
     return query_df
 
 
+def _rewrite_transcript_ids(orig_trids: pd.Series, gene_id: str) -> List[str]:
+    """Rewrite a gene group's transcript ids under ``gene_id``.
+
+    The tail (everything after the first '_') identifies the transcript only
+    when it is unique inside the group: two reference transcripts flagged
+    'AlterTss', or two bare reference ids, collapse onto the same candidate
+    and would produce the SAME TrID. Rows whose candidate collides keep
+    their full original id, which is unique within the frame.
+
+    The length of the result is ``len(gene_id) + 1 + len(suffix)``; the
+    suffix is unbounded, so a gene id within ``MAX_GENE_ID_LEN`` does not
+    by itself guarantee a transcript id within the QNAME limit.
+
+    Args:
+        orig_trids: The group's original transcript ids.
+        gene_id: The gene id the transcript ids are rewritten under.
+
+    Returns:
+        The rewritten transcript ids, in the order of ``orig_trids``.
+    """
+    has_sep = orig_trids.str.contains('_')
+    tails = orig_trids.str.split('_', n=1).str[-1]
+
+    candidates = [
+        f"{gene_id}_{tail}" if sep else gene_id
+        for tail, sep in zip(tails, has_sep)
+    ]
+    cand_counts = pd.Series(candidates).value_counts()
+    return [
+        c if cand_counts[c] == 1 else f"{gene_id}_{o}"
+        for c, o in zip(candidates, orig_trids)
+    ]
+
+
 def novel_gene_remapping(df_result: pd.DataFrame,
                          ref_anno: Optional[pd.DataFrame],
                          terminal_tolerance: int = 50,
@@ -324,12 +359,20 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                     gene_id = 'NovelGeneCluster_' + '_'.join(source_gene_ids)
                     gene_name = 'NovelGeneCluster_' + '_'.join(source_gene_names)
 
-                # An over-long gene id / gene name must not be emitted: it ends
-                # up as a reference name in the BAM/FASTQ and would exceed the
-                # SAM v1.6 QNAME limit of 254 bytes. Replace it with a short
-                # deterministic aggregate id and keep the source list in
-                # ``long_fusion_map`` so the association is not lost.
-                if len(gene_id) > MAX_GENE_ID_LEN or len(gene_name) > MAX_GENE_ID_LEN:
+                # The gene id and the transcript id share ONE budget: both
+                # end up as reference names in the BAM/FASTQ, and SAM v1.6
+                # caps QNAME at 254 bytes. The gene id is a prefix of the
+                # transcript id, and the transcript suffix is added on top of
+                # it, so the two limits have to be accounted for together.
+                original_gene_id, original_gene_name = gene_id, gene_name
+
+                def _aggregate_id() -> str:
+                    """Allocate the next short aggregate id for this group.
+
+                    The source gene ids / names are recorded in
+                    ``long_fusion_map`` so the association is not lost.
+                    """
+                    nonlocal long_fusion_index
                     long_fusion_index += 1
                     aggregate_id = f"{LONG_FUSION_PREFIX}{long_fusion_index}"
                     if long_fusion_map is not None:
@@ -338,40 +381,51 @@ def novel_gene_remapping(df_result: pd.DataFrame,
                             'source_gene_ids': ','.join(source_gene_ids),
                             'source_gene_names': ','.join(source_gene_names),
                             'n_source_genes': len(source_gene_ids),
-                            'original_gene_id': gene_id,
-                            'original_gene_name': gene_name,
+                            'original_gene_id': original_gene_id,
+                            'original_gene_name': original_gene_name,
                         })
-                    gene_id = aggregate_id
-                    gene_name = aggregate_id
+                    return aggregate_id
+
+                # An over-long gene id / gene name must not be emitted: it ends
+                # up as a reference name in the BAM/FASTQ and would exceed the
+                # SAM v1.6 QNAME limit of 254 bytes. Replace it with a short
+                # deterministic aggregate id and keep the source list in
+                # ``long_fusion_map`` so the association is not lost.
+                shortened = False
+                if len(gene_id) > MAX_GENE_ID_LEN or len(gene_name) > MAX_GENE_ID_LEN:
+                    gene_id = gene_name = _aggregate_id()
+                    shortened = True
 
                 # Replace current group's GeneID and GeneName
                 group_df['GeneID'] = gene_id
                 group_df['GeneName'] = gene_name
 
-                # Rewrite the transcript ids. The tail (everything after the
-                # first '_') identifies the transcript only when it is unique
-                # inside this group: two reference transcripts flagged
-                # 'AlterTss', or two bare reference ids, collapse onto the same
-                # candidate and would produce the SAME TrID. Rows whose
-                # candidate collides keep their full original id, which is
-                # unique within the frame.
+                # Rewrite the transcript ids under the (possibly shortened)
+                # gene id.
                 orig_trids = group_df['TrID'].astype(str)
-                has_sep = orig_trids.str.contains('_')
-                tails = orig_trids.str.split('_', n=1).str[-1]
+                new_trids = _rewrite_transcript_ids(orig_trids, gene_id)
 
-                def _candidate(tr_id, tail, sep):
-                    if sep:
-                        return f"{gene_id}_{tail}"
-                    return gene_id
+                # A gene id within its own limit does NOT guarantee a
+                # transcript id within the QNAME limit: the suffix
+                # ("_<tail>", or the full original id in the collision
+                # fallback) is added on top of it. Shorten the gene id as
+                # well and recompute.
+                if not shortened and max(len(t) for t in new_trids) > MAX_TRANSCRIPT_ID_LEN:
+                    gene_id = gene_name = _aggregate_id()
+                    group_df['GeneID'] = gene_id
+                    group_df['GeneName'] = gene_name
+                    new_trids = _rewrite_transcript_ids(orig_trids, gene_id)
 
-                candidates = [
-                    _candidate(o, t, s) for o, t, s in zip(orig_trids, tails, has_sep)
-                ]
-                cand_counts = pd.Series(candidates).value_counts()
-                new_trids = [
-                    c if cand_counts[c] == 1 else f"{gene_id}_{o}"
-                    for c, o in zip(candidates, orig_trids)
-                ]
+                over_long = [t for t in new_trids if len(t) > MAX_TRANSCRIPT_ID_LEN]
+                if over_long:
+                    raise RuntimeError(
+                        f"[FAIL-LOUD] {len(over_long)} transcript id(s) of gene "
+                        f"'{gene_id}' exceed the {MAX_TRANSCRIPT_ID_LEN}-byte "
+                        f"limit even after shortening the gene id (longest "
+                        f"{max(len(t) for t in over_long)} bytes): "
+                        f"{sorted(set(over_long))[:3]}"
+                    )
+
                 if len(set(new_trids)) != len(new_trids):
                     raise RuntimeError(
                         f"Transcript id rewrite produced duplicates inside gene "
