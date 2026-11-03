@@ -115,7 +115,9 @@ One sidecar makes that explicit:
 | `aidrs.gene.model_map.tsv` | gene | `in_transcript_model`, `n_model_transcripts`, `n_total_transcripts` |
 
 `L` itself needs no sidecar: it is the gene-counts column sum, and it is recoverable from the
-transcript layer as `count / cpm * 1e6` — the two agree on every library.
+transcript layer as `count / cpm * 1e6` (on the rows that carry reads) — the two agree on every
+library. The count matrix and the CPM matrix of a layer describe the same rows in the same order,
+so the two can be compared — or zipped — row by row.
 
 ### Reads that are discarded
 
