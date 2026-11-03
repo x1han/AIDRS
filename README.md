@@ -102,43 +102,19 @@ When the input BAM carries per-read polyA tail lengths (typically emitted by Dor
 
 ### The two layers have different scopes — and the same denominator
 
-The **transcript layer** (`aidrs.transcript.counts.tsv`, `aidrs.transcript.cpm.tsv`) is the
-final model: it contains only transcripts that passed `--min_expressed_samples`. The
-**gene layer** (`aidrs.gene.counts.tsv`, `aidrs.gene.cpm.tsv`) is aggregated from *all*
-quantified transcripts, so it is deliberately a **superset** of the model: a gene can
-carry counts while none of its transcripts is in `aidrs.transcript_model.gtf`. The gene
-counts stay the true counts of the gene (not a partial sum over surviving
-transcripts), which keeps them comparable to independent gene-level counters such as
-featureCounts.
+The **transcript layer** keeps only the transcripts that passed `--min_expressed_samples`;
+the **gene layer** is aggregated from *all* quantified transcripts, so it is deliberately a
+**superset** of the model (a gene can carry counts while none of its transcripts is in
+`aidrs.transcript_model.gtf`). Both CPM tables use the **same denominator per library**
+(`L` = the library size), so a CPM column sums to `1e6` only when the layer covers every
+quantified transcript.
 
-`aidrs.gene.model_map.tsv` makes that scope explicit. One row per gene:
+Two sidecars make that explicit:
 
-| Column | Meaning |
-|---|---|
-| `GeneID`, `GeneName` | the gene key used by the matrices |
-| `in_transcript_model` | `True` iff the gene has ≥ 1 transcript in the delivered model |
-| `n_model_transcripts` | transcripts of this gene in the delivered model |
-| `n_total_transcripts` | transcripts of this gene in the *unfiltered* quantification (what the gene row was aggregated from) |
-
-**Both CPM tables share one denominator per library.** `CPM = (y_ij / L) * 1e6`, where
-`L` is the library size — the number of reads assigned to transcripts in that library.
-A CPM column therefore sums to `1e6` only when the layer covers *every* quantified
-transcript; otherwise it sums to less, by exactly the CPM of the rows the layer does
-not contain. With the default `--min_expressed_samples=1` the transcript filter is a
-no-op, so both column sums equal `1e6`. With `--min_expressed_samples >= 2` the
-transcript layer is an intentional subset and its column sum is legitimately smaller
-than the gene layer's.
-
-`aidrs.matrix.denominators.tsv` records this explicitly, one row per library:
-
-| Column | Meaning |
-|---|---|
-| `sample` | library name |
-| `n_transcripts` | transcripts with a non-zero count in this library |
-| `n_genes` | genes with a non-zero count in this library |
-| `total_reads_L` | the CPM denominator `L` of this library |
-| `transcript_cpm_col_sum` | sum of the delivered transcript CPM column |
-| `gene_cpm_col_sum` | sum of the delivered gene CPM column |
+| File | One row per | Columns |
+|---|---|---|
+| `aidrs.gene.model_map.tsv` | gene | `in_transcript_model`, `n_model_transcripts`, `n_total_transcripts` |
+| `aidrs.matrix.denominators.tsv` | library | `n_transcripts`, `n_genes`, `total_reads_L`, `transcript_cpm_col_sum`, `gene_cpm_col_sum` |
 
 ### Reads that are discarded
 
