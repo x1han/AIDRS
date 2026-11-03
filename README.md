@@ -114,6 +114,9 @@ One sidecar makes that explicit:
 |---|---|---|
 | `aidrs.gene.model_map.tsv` | gene | `in_transcript_model`, `n_model_transcripts`, `n_total_transcripts` |
 
+`L` itself needs no sidecar: it is the gene-counts column sum, and it is recoverable from the
+transcript layer as `count / cpm * 1e6` — the two agree on every library.
+
 ### Reads that are discarded
 
 AIDRS count and CPM matrices retain reads that fully match the final transcript model. If you need to retain all FLNC reads, including low-coverage reads that do not match a model, or want probabilistic assignment of ambiguous reads, use [NanoCount](https://github.com/a-slide/NanoCount) as a complementary quantifier. 
