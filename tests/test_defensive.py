@@ -1204,7 +1204,6 @@ class TestIdValidator:
 
 from src.aidrs_runtime.report_writers import (
     write_gene_model_map,
-    write_matrix_denominators,
 )
 
 
@@ -1263,50 +1262,3 @@ class TestGeneModelMap:
                                                           "n_total_transcripts"]))
         df = pd.read_csv(path, sep="\t")
         assert set(df["GeneID"]) == {"G1", "G2", "G3"}
-
-
-class TestMatrixDenominators:
-    """``aidrs.matrix.denominators.tsv`` must expose the CPM scale."""
-
-    def test_columns_and_one_row_per_library(self, tmp_path):
-        tx_counts, tx_cpm, gene_counts, gene_cpm = _layer_matrices()
-        path = write_matrix_denominators(
-            str(tmp_path), tx_counts, tx_cpm, gene_counts, gene_cpm,
-            {"s1": 100, "s2": 100})
-        df = pd.read_csv(path, sep="\t")
-        assert list(df.columns) == ["sample", "n_transcripts", "n_genes",
-                                    "total_reads_L", "transcript_cpm_col_sum",
-                                    "gene_cpm_col_sum"]
-        assert df["sample"].tolist() == ["s1", "s2"]
-
-    def test_counts_and_column_sums_match_the_delivered_matrices(self, tmp_path):
-        tx_counts, tx_cpm, gene_counts, gene_cpm = _layer_matrices()
-        path = write_matrix_denominators(
-            str(tmp_path), tx_counts, tx_cpm, gene_counts, gene_cpm,
-            {"s1": 100, "s2": 100})
-        df = pd.read_csv(path, sep="\t").set_index("sample")
-
-        assert int(df.loc["s1", "n_transcripts"]) == 3      # all 3 have reads
-        assert int(df.loc["s1", "n_genes"]) == 3
-        assert int(df.loc["s2", "n_transcripts"]) == 1
-        assert int(df.loc["s2", "n_genes"]) == 1
-        assert int(df.loc["s1", "total_reads_L"]) == 100
-
-        # The transcript layer is filtered, the gene layer is not: the two
-        # column sums differ by exactly the CPM of the filtered-out rows.
-        assert df.loc["s1", "transcript_cpm_col_sum"] == pytest.approx(600000.0)
-        assert df.loc["s1", "gene_cpm_col_sum"] == pytest.approx(670000.0)
-
-    def test_both_layers_share_one_denominator(self, tmp_path):
-        """CPM == count / L * 1e6 with the SAME L in both layers."""
-        tx_counts, tx_cpm, gene_counts, gene_cpm = _layer_matrices()
-        lib_sizes = {"s1": 100, "s2": 100}
-        path = write_matrix_denominators(
-            str(tmp_path), tx_counts, tx_cpm, gene_counts, gene_cpm, lib_sizes)
-        df = pd.read_csv(path, sep="\t").set_index("sample")
-        for sample, L in lib_sizes.items():
-            assert float(df.loc[sample, "total_reads_L"]) == L
-            expected_tx = tx_counts[sample].astype(float) / L * 1e6
-            assert np.allclose(tx_cpm[sample].values, expected_tx.values)
-            expected_gene = gene_counts[sample].astype(float) / L * 1e6
-            assert np.allclose(gene_cpm[sample].values, expected_gene.values)

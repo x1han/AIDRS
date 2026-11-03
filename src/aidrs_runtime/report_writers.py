@@ -24,9 +24,6 @@ This module owns the high-level report-writing logic that
 - ``write_gene_model_map``: write ``aidrs.gene.model_map.tsv``, the
   gene-layer scope contract (which gene rows are outside the transcript
   model).
-- ``write_matrix_denominators``: write
-  ``aidrs.matrix.denominators.tsv``, the CPM scale contract (the
-  per-library denominator and the resulting column sums).
 
 Functions are module-level (not class methods) so they are testable
 without instantiating the full ``IsoformAnnotator`` orchestrator. The
@@ -364,65 +361,6 @@ def write_gene_model_map(output_dir: str,
     out_path = os.path.join(output_dir, 'aidrs.gene.model_map.tsv')
     merged[['GeneID', 'GeneName', 'in_transcript_model',
             'n_model_transcripts', 'n_total_transcripts']].to_csv(
-        out_path, sep='\t', index=False)
-    return out_path
-
-
-def write_matrix_denominators(output_dir: str,
-                              transcript_counts: pd.DataFrame,
-                              transcript_cpm: pd.DataFrame,
-                              gene_counts: pd.DataFrame,
-                              gene_cpm: pd.DataFrame,
-                              library_sizes: Dict[str, int]) -> str:
-    """Write ``aidrs.matrix.denominators.tsv`` -- the CPM scale contract.
-
-    Every CPM table in a run uses the **same** denominator per library:
-    ``L`` = the number of reads assigned to transcripts in that library
-    (``L`` is the standard CPM library size; ``CPM = (y_ij / L) * 1e6``).
-    A column therefore sums to ``1e6`` only if the layer covers *every*
-    quantified transcript. The transcript layer is filtered by
-    ``--min_expressed_samples`` and the gene layer is not, so their column
-    sums legitimately differ.
-
-    Columns:
-
-    - ``sample``: library name.
-    - ``n_transcripts``: transcripts with a non-zero count in this library
-      (delivered transcript matrix).
-    - ``n_genes``: genes with a non-zero count in this library (delivered
-      gene matrix).
-    - ``total_reads_L``: the CPM denominator ``L`` of this library.
-    - ``transcript_cpm_col_sum``: sum of the delivered transcript CPM column.
-    - ``gene_cpm_col_sum``: sum of the delivered gene CPM column.
-
-    Args:
-        output_dir: Run output directory.
-        transcript_counts: Delivered transcript count matrix.
-        transcript_cpm: Delivered transcript CPM matrix.
-        gene_counts: Delivered gene count matrix.
-        gene_cpm: Delivered gene CPM matrix.
-        library_sizes: Mapping library name -> total assigned reads (``L``).
-
-    Returns:
-        Path of the written file.
-    """
-    samples = list(transcript_cpm.columns)
-    rows = []
-    for sample in samples:
-        tx_col = transcript_counts[sample] if sample in transcript_counts.columns else None
-        gene_col = gene_counts[sample] if sample in gene_counts.columns else None
-        rows.append({
-            'sample': sample,
-            'n_transcripts': int((tx_col > 0).sum()) if tx_col is not None else 0,
-            'n_genes': int((gene_col > 0).sum()) if gene_col is not None else 0,
-            'total_reads_L': int(library_sizes.get(sample, 0)),
-            'transcript_cpm_col_sum': round(float(transcript_cpm[sample].sum()), 6),
-            'gene_cpm_col_sum': round(float(gene_cpm[sample].sum()), 6),
-        })
-    out_path = os.path.join(output_dir, 'aidrs.matrix.denominators.tsv')
-    pd.DataFrame(rows, columns=['sample', 'n_transcripts', 'n_genes',
-                                 'total_reads_L', 'transcript_cpm_col_sum',
-                                 'gene_cpm_col_sum']).to_csv(
         out_path, sep='\t', index=False)
     return out_path
 

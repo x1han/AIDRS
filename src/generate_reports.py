@@ -108,25 +108,17 @@ class IsoformAnnotator:
                 output_path = os.path.join(output_dir, f'aidrs.{name}.tsv')
                 matrix.to_csv(output_path, sep='\t')
 
-            # ---- 2.1 Layer-scope / CPM-scale sidecars ----
+            # ---- 2.1 Layer-scope sidecar ----
             # The gene layer is aggregated from the unfiltered quantification
-            # while the transcript model is the filtered one, and both CPM
-            # layers share one denominator per library. Neither is obvious
-            # from the matrices alone, so both contracts are shipped as
-            # sidecars (see the README section "Quantification (Counts &
+            # while the transcript model is the filtered one. That scope is
+            # not obvious from the matrices alone, so it is shipped as a
+            # sidecar (see the README section "Quantification (Counts &
             # CPM)").
             report_writers.write_gene_model_map(
                 output_dir,
                 quantification_matrices['transcript.counts'],
                 quantification_matrices['gene.counts'],
                 quantifier.gene_transcript_counts)
-            report_writers.write_matrix_denominators(
-                output_dir,
-                quantification_matrices['transcript.counts'],
-                quantification_matrices['transcript.cpm'],
-                quantification_matrices['gene.counts'],
-                quantification_matrices['gene.cpm'],
-                quantifier.library_sizes)
 
             # Update annotated_df with the filtered version
             annotated_df = filtered_annotated_df

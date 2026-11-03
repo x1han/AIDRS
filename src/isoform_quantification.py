@@ -29,12 +29,10 @@ class IsoformQuantifier:
         self.num_processes = ResourceGuard.get_effective_cpu_threads(num_processes)
         self.min_expressed_samples = min_expressed_samples
         self.allow_partial_quantification = allow_partial_quantification
-        # Per-library size (the CPM denominator) and the per-gene number of
-        # quantified transcripts. Both are only recoverable from the
-        # *unfiltered* quantification, so they are recorded while it is
-        # still in hand -- the delivered matrices are filtered and cannot
-        # reconstruct them.
-        self.library_sizes: Dict[str, int] = {}
+        # Per-gene number of quantified transcripts. Only recoverable from
+        # the *unfiltered* quantification, so it is recorded while it is
+        # still in hand -- the delivered transcript matrix is filtered and
+        # cannot reconstruct it.
         self.gene_transcript_counts = pd.DataFrame(
             columns=['GeneID', 'GeneName', 'n_total_transcripts'])
 
@@ -298,13 +296,6 @@ class IsoformQuantifier:
                 f"TrID/GeneID/GeneName; gene-level assignment is ambiguous and the "
                 f"gene matrix would silently drop them."
             )
-
-        # The CPM denominator of every library: the number of reads assigned
-        # to transcripts in that library. Both CPM layers use it, so it is
-        # the scale factor of the whole run. Recorded here because the
-        # delivered matrices are filtered and cannot recover it.
-        self.library_sizes = quant_results.groupby(
-            'sample', observed=True)['count'].sum().astype(int).to_dict()
 
         # Per gene, how many transcripts were quantified (the gene layer is
         # aggregated from all of them, while the transcript model keeps only

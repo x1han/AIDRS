@@ -81,7 +81,6 @@ aidrs \
 - `aidrs.transcript.counts.tsv` / `aidrs.transcript.cpm.tsv`: Per-sample raw counts and CPM matrices at the transcript level.
 - `aidrs.gene.counts.tsv` / `aidrs.gene.cpm.tsv`: Per-sample raw counts and CPM matrices at the gene level.
 - `aidrs.gene.model_map.tsv`: For every gene of the gene layer, whether it is in the transcript model and how many of its transcripts are. See [Quantification (Counts & CPM)](#quantification-counts--cpm).
-- `aidrs.matrix.denominators.tsv`: Per-library CPM denominator and the resulting column sums of both CPM matrices. See [Quantification (Counts & CPM)](#quantification-counts--cpm).
 
 See [Quantification (Counts & CPM)](#quantification-counts--cpm) for what reads contribute to these matrices and what is intentionally discarded.
 
@@ -109,12 +108,11 @@ the **gene layer** is aggregated from *all* quantified transcripts, so it is del
 (`L` = the library size), so a CPM column sums to `1e6` only when the layer covers every
 quantified transcript.
 
-Two sidecars make that explicit:
+One sidecar makes that explicit:
 
 | File | One row per | Columns |
 |---|---|---|
 | `aidrs.gene.model_map.tsv` | gene | `in_transcript_model`, `n_model_transcripts`, `n_total_transcripts` |
-| `aidrs.matrix.denominators.tsv` | library | `n_transcripts`, `n_genes`, `total_reads_L`, `transcript_cpm_col_sum`, `gene_cpm_col_sum` |
 
 ### Reads that are discarded
 
