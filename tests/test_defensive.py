@@ -720,7 +720,10 @@ class TestQuantificationFailsLoud:
     """A quantification failure must abort, not silently produce a partial run."""
 
     def test_quantification_failure_is_not_swallowed(self):
-        src = Path("src/generate_reports.py").read_text()
+        # located relative to this file, not to the CWD: the suite must pass
+        # whichever directory pytest is invoked from
+        src = (Path(__file__).resolve().parents[1]
+               / "src" / "generate_reports.py").read_text()
         assert "quantification_success" not in src
         assert "Warning: Quantification failed" not in src
 
