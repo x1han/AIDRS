@@ -126,3 +126,34 @@ AIDRS count and CPM matrices retain reads that fully match the final transcript 
 NanoCount uses an expectation-maximization (EM) algorithm to distribute multi-mapping reads probabilistically across compatible isoforms. Unlike AIDRS's default counting, NanoCount requires alignments to a **transcriptome reference** (not the genome), and reads must be aligned with `minimap2` retaining secondary alignments (`-N 10`).
 
 AIDRS's `aidrs.transcript_model.gtf`, `aidrs.transcript_model.fasta` can feed this NanoCount workflow alongside the original BAM and reads FASTA. NanoCount is a complement to AIDRS's default counting and filtering, not a replacement for them.
+
+---
+
+## License
+
+AIDRS's own source code is licensed under the **GNU General Public License v3.0 only**
+(`GPL-3.0-only`); see [`LICENSE`](LICENSE). Copyright (C) 2025-2026 Xi Han.
+
+This repository bundles third-party components that are **not** covered by the GPL and keep their
+own terms; the `aidrs` wheel additionally ships the TranslationAI source and its trained weights:
+
+| Component | Upstream | Terms |
+|---|---|---|
+| `aided/Puffin/` — model code and `resources/puffin.pth` | [jzhoulab/puffin](https://github.com/jzhoulab/puffin) | Academic research use only; commercial use and use by for-profit entities are expressly prohibited (BSD-3-Clause-style text carrying a non-commercial restriction; see `aided/Puffin/LICENSE`) |
+| `aided/TranslationAI/` — source | [rnasys/TranslationAI](https://github.com/rnasys/TranslationAI) | GNU AGPL v3.0 (upstream's `LICENSE` file; upstream's README and `setup.py` say "GPLv3" — upstream is internally inconsistent, and so is this copy's locally authored `pyproject.toml`) |
+| `aided/TranslationAI/translationai/models/*.h5` — trained weights, shipped in the wheel | same | Stated upstream as [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (academic and non-commercial use); upstream publishes no separate license text for the weights and lists Xiaojuan Fan as its author |
+
+Notes:
+
+- AIDRS **imports** the Puffin and TranslationAI code into the same process, so in a checkout the
+  bundle is a combined work rather than a mere aggregation. GPLv3 §13 / AGPLv3 §13 permit
+  combining GPLv3 code with the AGPL-3.0 TranslationAI source; if you modify that combination and
+  let users interact with it remotely, AGPLv3 §13's network-source clause applies to it.
+- The Puffin terms are **not** GPL-compatible (academic research use only). Consequently the
+  repository distribution is **not licensed for use, modification or redistribution for commercial
+  or for-profit purposes**, regardless of the GPL terms applying to AIDRS's own code; in the wheel
+  the same restriction follows from the non-commercial weights.
+- The trained TranslationAI weights are non-commercial (CC BY-NC 4.0) and are not conveyed under
+  GPL terms.
+- Both vendored copies carry local modifications (thread pinning, model-path resolution,
+  documentation fixes), which is why the AGPL's source-offer obligations are live.
