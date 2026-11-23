@@ -363,7 +363,7 @@ def isoform_validating(df, args, ref_anno=None):
     # Extract unique sample names through column names
     samples = set()
     for col in df.columns:
-        match = re.match(r'(.+?)_(TrStart_reads|TrEnd_reads|frequency)', col)
+        match = re.match(r'(.+?)_(TrStart_reads|TrEnd_reads|frequency|read_polyA_len)', col)
         if match:
             samples.add(match.group(1))
     samples = sorted(samples)  # Sort to ensure reproducibility
@@ -580,11 +580,23 @@ def run_pipeline(args, ref_anno=None):
         rename_cols = {
             'TrStart_reads': f'{sample}_TrStart_reads',
             'TrEnd_reads': f'{sample}_TrEnd_reads',
-            'frequency': f'{sample}_frequency'
+            'frequency': f'{sample}_frequency',
+            'read_polyA_len': f'{sample}_read_polyA_len'
         }
         df = df.rename(columns=rename_cols)
-        # Keep key columns for merging + renamed value columns
-        cols_to_keep = ['Chr', 'Strand', 'SSC'] + list(rename_cols.values())
+        # Keep key columns for merging + renamed value columns. Only
+        # read_polyA_len is optional (a sample frame produced before the pt
+        # column existed); the read arrays and the frequency must be present,
+        # so a missing one still raises instead of silently disappearing.
+        cols_to_keep = ['Chr', 'Strand', 'SSC'] + [
+            v for k, v in rename_cols.items() if k != 'read_polyA_len']
+        # NOTE: the check must use the RENAMED column name -- after the
+        # rename above the column is '{sample}_read_polyA_len', so testing
+        # for the bare 'read_polyA_len' would always be False and the pt
+        # column would be dropped here (the per-read pt would then never
+        # reach Stage 2.1).
+        if rename_cols['read_polyA_len'] in df.columns:
+            cols_to_keep.append(rename_cols['read_polyA_len'])
         df = df[cols_to_keep]
         dfs_processed.append(df)
 
@@ -600,6 +612,12 @@ def run_pipeline(args, ref_anno=None):
     for col in merged_df.columns:
         if 'TrStart_reads' in col or 'TrEnd_reads' in col:
             merged_df[col] = merged_df[col].apply(lambda x: x if isinstance(x, np.ndarray) else np.array([]))
+        elif 'read_polyA_len' in col:
+            # Per-read poly(A) tail lengths: an absent sample contributes no
+            # reads, so it must contribute an EMPTY int32 array (not NaN),
+            # otherwise the per-sample concatenation below misaligns.
+            merged_df[col] = merged_df[col].apply(
+                lambda x: x if isinstance(x, np.ndarray) else np.array([], dtype=np.int32))
         elif 'frequency' in col:
             merged_df[col] = merged_df[col].fillna(0).astype(int)
 
@@ -609,6 +627,10 @@ def run_pipeline(args, ref_anno=None):
     trstart_cols = [col for col in merged_df.columns if 'TrStart_reads' in col]
     trend_cols = [col for col in merged_df.columns if 'TrEnd_reads' in col]
     freq_cols = [col for col in merged_df.columns if 'frequency' in col]
+    # Per-read poly(A) tail lengths, concatenated in exactly the same sample
+    # order as the read arrays (the order of trstart_cols) so that the pt
+    # column stays parallel to TrStart_reads / TrEnd_reads.
+    pt_cols = assert_pt_parallel(merged_df, trstart_cols)
 
     merged_df['TrStart_reads'] = merged_df[trstart_cols].apply(
         lambda row: np.concatenate([x for x in row.values if isinstance(x, np.ndarray)]) 
@@ -621,6 +643,40 @@ def run_pipeline(args, ref_anno=None):
                     if any(isinstance(x, np.ndarray) for x in row.values) else np.array([]),
         axis=1
     )
+
+    if pt_cols:
+        merged_df['read_polyA_len'] = merged_df[pt_cols].apply(
+            lambda row: np.concatenate([x for x in row.values if isinstance(x, np.ndarray)])
+                        if any(isinstance(x, np.ndarray) for x in row.values) else np.array([], dtype=np.int32),
+            axis=1
+        )
+
+        # Fail-loud: the pt column must stay parallel to the read arrays.
+        n_pt = merged_df['read_polyA_len'].apply(len)
+        n_start = merged_df['TrStart_reads'].apply(len)
+        n_end = merged_df['TrEnd_reads'].apply(len)
+        if not ((n_pt == n_start) & (n_start == n_end)).all():
+            raise RuntimeError(
+                "read_polyA_len is not parallel to TrStart_reads/TrEnd_reads: "
+                f"{int((n_pt != n_start).sum())} / {int((n_start != n_end).sum())} rows mismatch"
+            )
+
+        # Observability: state explicitly that the per-read pt reached the
+        # terminal estimator. Without this line a lost pt column is invisible
+        # (the feature is simply inert and the output looks unchanged).
+        n_pt_pos = sum(int(np.count_nonzero(x > 0)) for x in merged_df['read_polyA_len'])
+        n_reads_total = sum(int(len(x)) for x in merged_df['read_polyA_len'])
+        logger.info(
+            "    [POLYA-AWARE-TERMINAL] per-read pt reached the terminal estimator: "
+            f"{len(pt_cols)} sample column(s), {n_pt_pos}/{n_reads_total} read(s) with pt>0 "
+            "(A2'/A2'-b active on the 3' side)"
+        )
+
+        # The per-sample pt columns have been merged into the combined
+        # read_polyA_len column above; drop them so the per-group frames
+        # pickled to the Stage-2.1 workers do not carry a second copy of the
+        # per-read data.
+        merged_df = merged_df.drop(columns=pt_cols)
 
     merged_df['frequency'] = merged_df[freq_cols].sum(axis=1).astype(int)
 
