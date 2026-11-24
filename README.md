@@ -106,6 +106,8 @@ Dorado's `pt:i` tag is the measured poly(A) tail length of a read:
 
 Barcode / SeqTagger libraries carry a **library-level** `pt:i=0` rate that differs strongly between libraries of the same cohort. Measured on the RNA-004 barcode cohort (two runs): the per-library rate ranges from 4.4–11.4 % for most libraries up to 30.5–40.9 % for one of them. A high `pt:i=0` rate means less poly(A) evidence per locus, hence fewer 3' variants AIDRS can distinguish and more coordinates that fall back to the read-level mode.
 
+The failure mode is specific to barcoded libraries. In ten `noSeqTagger` control libraries (COPD29/38/41/45/52, HC2/3/26/30/31) the `pt:i=0` count is **exactly 0** — the only failure state present is a missing `pt` tag — while the barcoded RNA-004 cohort of the same chemistry shows 14.7–16.0 % `pt:i=0` in the merged pool. Two caveats: the control libraries were basecalled with a different Dorado release (0.8.0 vs 1.3.0), so this is not a controlled comparison; and the demultiplexing step lowers the rate AIDRS actually sees (below).
+
 Two measurement caveats that matter when you set thresholds:
 
 - **Measure the merged (pre-demux) BAM as well as the demuxed one.** Barcode assignment fails preferentially on `pt:i=0` reads, so demultiplexing *lowers* the measured `pt:i=0` rate: on the same cohort, 14.7 % of the merged pool became 11.6 % after demultiplexing, and 52 % of the discarded reads were `pt:i=0` reads. The post-demux number AIDRS sees is a biased-low estimate of the library's real rate.
