@@ -160,8 +160,10 @@ class polyAnnotator:
                 f"table must hold exactly one row per merge key."
             )
 
-        out['polyA_frac'] = out['polyA_frac'].fillna(0)
-        out['polyA_frac_pooled'] = out['polyA_frac_pooled'].fillna(0)
+        # A key the per-key table does not cover carries NO poly(A) evidence.
+        # Filling it with 0 turned "no measurement" into "measured zero" and
+        # made the Stage 2.6 gate delete the model (0.73 % of the models in
+        # the BC1-BC6 run). NaN is State 3 and takes the bypass.
         out['polyA_n_samples'] = out['polyA_n_samples'].fillna(0).astype(int)
         return out
 

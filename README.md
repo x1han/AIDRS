@@ -83,7 +83,7 @@ python scripts/verify_c107_golden.py --baseline <baseline output dir> --candidat
 
 The gate passes when either
 
-- **(a)** the sha256 of `aidrs.transcript.assessment.tsv` hits the pinned golden `c289f84d1899b2dd45088200cde8334e867bae7416ece05c23283a4a6d69b440`, or
+- **(a)** the sha256 of `aidrs.transcript.assessment.tsv` hits the pinned golden `004fbc40c3ecdf75c346b86250db168661ae053fedd33d5429a51eca1929d1fe`, or
 - **(b)** the change is bounded: the five quantification files are byte-identical to the baseline, the assessment schema is unchanged and only `TrStart` / `TrEnd` / `seq_len` / `TIS_related_location` / `TTS_related_location` / `TIS_score` / `TTS_score` differ, every 5' change is attributable to a new 3' variant (no model moved its 5' end while its 3' end stayed put), at most 1 % of the models moved their 3' end, and the score columns agree within 1e-5.
 
 Mode (a) pins the assessment only — a regression confined to the counts/CPM layer would leave the assessment digest untouched — so pass `--baseline` to have the five quantification files compared in mode (a) as well. The gate prints a receipt on the comparison path (baseline and candidate sha256, matched/unmatched model counts, the 5' violation counts and the 3' change count) and fails loudly when the comparison would be vacuous. Mode (b) does not absorb changes that add or remove models — a different model count, a changed model id or a changed assessment schema is a FAIL, not a bounded change.
@@ -91,6 +91,8 @@ Mode (a) pins the assessment only — a regression confined to the counts/CPM la
 Byte-level comparisons need the usual preconditions: an isolated `TMPDIR` per run (a shared `TMPDIR` produces a spurious 2-row difference), the same BAM file name, `--threads` pinned, and no other AIDRS run on the same box. Produce the baseline from a pinned commit (`git archive <sha>`) and record that sha with `--baseline-label`, which is echoed into the receipt.
 
 The pinned golden assumes that at most one library contributes reads to a key: only then are the pooled ratio and the unweighted median the same number, and only then is the `polyA_frac` column guaranteed not to move. The gate reads the library count from the quantification header and prints it in the receipt; when it is greater than one it warns, because a second library legitimately moves `polyA_frac` for the keys its reads reach and forces a re-baseline (record the new sha and its cause).
+
+**The golden was re-pinned when the default path's poly(A) gate went live.** The digest `c289f84d1899b2dd45088200cde8334e867bae7416ece05c23283a4a6d69b440` (1 019 models) was the *pre-fix* golden, produced while the gate was inert; it is now the digest of the **`--disable_polya_filter`** run, which is byte-identical to it — that is the control that attributes the digest change to the gate alone. The live default path produces `004fbc40c3ecdf75c346b86250db168661ae053fedd33d5429a51eca1929d1fe` (1 015 models): the poly(A) branch now removes the 4 models it used to keep. **The `TrID` of the novel transcripts is positional** (`NovelTr<n>`), so removing a model renumbers its siblings: an assessment diff between the two digests must be compared on the coordinate key (`Chr`, `Strand`, `TrStart`, `TrEnd`, `SSC`), never on `TrID`.
 
 ---
 
@@ -131,7 +133,30 @@ samtools view your.bam | grep -o 'pt:i:[-0-9]*' | sort | uniq -c | sort -rn | he
 
 If `pt:i:0` dominates, the options are a library without barcoding, or accepting more read-level (rather than poly(A)-supported) 3' end placement — there is no threshold that recovers the lost evidence.
 
-Note what `--polya_fraction_threshold` (default `0.95`) actually does today: on the **default** path the poly(A) criterion is not consulted at all — it requires a poly(A) read-count column that production does not produce — so changing that flag has no effect on a default run; the poly(A) gate is live only under `--hard_filter`. Under `--hard_filter` the threshold is applied to every row as `polyA_frac > threshold`, and it does not gate NMD/truncation rows on their own. On a `pt`-less BAM `polyA_frac` is NaN, so the poly(A) criterion is bypassed (the 5' Puffin gate still applies).
+### What `--polya_fraction_threshold` (default `0.95`) does
+
+The poly(A) criterion is **live on the default path**. It was inert before: the evidence test demanded a `polyA_valid_reads` column that the production path never produces for multi-exon rows, so the default path's poly(A) penalty never fired in any production run (only `--hard_filter` applied it).
+
+Both filter paths now judge the poly(A) evidence with the **same three states** and the same decision:
+
+| state | `polyA_frac` | meaning | default path | `--hard_filter` |
+| --- | --- | --- | --- | --- |
+| 1 | `> 0` | a poly(A) tail was detected | passes when `polyA_frac > threshold` | same |
+| 2 | `== 0` | the key was measured, no tail was detected | fails, unless the transcript is an FSM reference isoform | same |
+| 3 | `NaN` | no poly(A) evidence for this key | bypass — "no measurement" is never a penalty | same |
+
+- On the **default path** the poly(A) criterion is part of a *joint* decision with three branches, and a row is deleted when **any** of them hits:
+  - **NMD branch**: the model is called NMD **and** (its 5' Puffin score is below the threshold **or** its poly(A) fraction is below the threshold);
+  - **truncation branch**: the same, for a truncated model;
+  - **ultra-low-quality branch**: its 5' Puffin score is below the threshold **and** its poly(A) fraction is below the threshold.
+  ⇒ **a low poly(A) fraction on its own deletes nothing**: it needs a weak 5' end, an NMD verdict or a truncation verdict as well. A model with a strong 5' end, no NMD and no truncation survives whatever its poly(A) fraction is.
+- Under `--hard_filter` the two gates are ANDed: `Puffin_TSS_15bp > threshold` **and** the poly(A) criterion.
+- A frame with no poly(A) evidence at all (a BAM without `pt` tags) bypasses the criterion in both paths; the 5' Puffin gate still applies.
+- The evidence test is **frame-level**: a frame counts as "measured" only when it carries at least one **positive** `polyA_frac`. A frame whose every value is a measured zero therefore bypasses the criterion too — and it does so in `--hard_filter` as well, so the hard mode is looser than before for that (rare) cohort shape. This is deliberate: a frame of measured zeros carries no usable poly(A) evidence, and "no measurement" must never be a penalty.
+- The **FSM rescue** (a State 2 row that is a known reference isoform is kept) needs the reference genome, because the rescue block is guarded by it. The CLI requires `--reference`, so it is always live in production; only a library call that passes no genome FASTA loses it, and such a call filters its State 2 FSM rows like any other State 2 row.
+- **`--disable_polya_filter`** switches the poly(A) criterion off in both paths (the 5' Puffin gate still applies). Use it when the poly(A) evidence of a cohort is broken. Note that `--polya_fraction_threshold 0` is **not** the same thing: it cannot switch State 2 off.
+
+⚠️ **A key that the per-key poly(A) table does not cover carries `NaN`, not `0`.** `polyA_frac == 0` means "measured, no tail detected"; `NaN` means "no evidence for this key". (Before this change an uncovered key was filled with `0`, which turned "no measurement" into "measured zero" and made the gate delete the model — 0.73 % of the models in the BC1-BC6 run.)
 
 ### Purely single-exon genes are not assembled
 
@@ -143,7 +168,7 @@ The current version does **not** assemble genes whose transcripts are all single
 ### Main Output
 
 - `aidrs.transcript_model.gtf`: Final filtered transcript models (including known and novel isoforms).
-- `aidrs.transcript.assessment.tsv`: Transcript model assessment statistics (19-column canonical schema). The two `Puffin_TSS_*` columns are text: `no` means "no peak found", every other value is the numeric score written as a string — convert them before comparing with a threshold, otherwise a text value silently fails the numeric comparison (AIDRS's own 5' gate tests the value's type, not its text).
+- `aidrs.transcript.assessment.tsv`: Transcript model assessment statistics (19-column canonical schema). The two `Puffin_TSS_*` columns are text: `no` means "no peak found", every other value is the numeric score written as a string. AIDRS's own 5' gate reads them tolerantly (it converts a non-`no` string to a number before comparing it with the threshold), so the in-memory run and a run that re-reads this file delete exactly the same rows — but **your** analysis code must still convert them before comparing with a threshold.
 - `aidrs.transcript.counts.tsv` / `aidrs.transcript.cpm.tsv`: Per-sample raw counts and CPM matrices at the transcript level.
 - `aidrs.gene.counts.tsv` / `aidrs.gene.cpm.tsv`: Per-sample raw counts and CPM matrices at the gene level.
 - `aidrs.gene.model_map.tsv`: For every gene of the gene layer, whether it is in the transcript model and how many of its transcripts are. See [Quantification (Counts & CPM)](#quantification-counts--cpm).
@@ -165,6 +190,8 @@ When the input BAM carries per-read polyA tail lengths (typically emitted by Dor
 ### How `polyA_frac` is computed
 
 The `polyA_frac` column of `aidrs.transcript.assessment.tsv` is the **unweighted median of the per-sample poly(A) fractions** over the samples that carry measured poly(A) evidence for that transcript — a sample qualifies when it has at least 5 reads on the transcript **and** at least one read with a measured tail. With an even number of qualifying samples the median is the mean of the two middle values (the numpy convention). When no sample qualifies, the value falls back to the read-depth-weighted pooled ratio.
+
+**Contract of the three values in that column**: `> 0` = a poly(A) tail was detected on at least one read of the qualifying samples; `== 0` = the transcript was measured and no tail was detected on any of its reads; `NaN` (empty cell) = **no poly(A) evidence for this transcript** (the per-key poly(A) table does not cover it — e.g. a model with no reads at that key). `NaN` and `0` are different statements and are treated differently by the Stage 2.6 filter: `0` is a measured negative, `NaN` is a bypass.
 
 This is deliberate: a read-depth-weighted pooled ratio lets one abnormally deep library (or one library whose tails are systematically shorter) dominate the cohort's poly(A) evidence. With the median, a single abnormal library can no longer drag the whole cohort down. The per-sample numbers behind the value are delivered in `aidrs.transcript.polya_per_sample.tsv` (one row per transcript key and sample), together with the per-key aggregate, so the statistic stays auditable.
 
