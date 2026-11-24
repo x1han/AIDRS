@@ -94,7 +94,7 @@ Byte-level comparisons need the usual preconditions: an isolated `TMPDIR` per ru
 
 ## ⚠️ Known Limitations
 
-### Barcode / SeqTagger protocols inflate the `pt:i=0` rate
+### Barcode / SeqTagger libraries and the `pt:i=0` rate
 
 Dorado's `pt:i` tag is the measured poly(A) tail length of a read:
 
@@ -104,16 +104,21 @@ Dorado's `pt:i` tag is the measured poly(A) tail length of a read:
 | `0` | the poly(A) anchor was found, but the tail length could not be estimated |
 | `-1` / tag absent | no poly(A) anchor was found |
 
-Ligation-based barcode / SeqTagger libraries are observed to emit `pt:i=0` for a large fraction of their reads — in the RNA-004 barcode run measured for the AIDRS expert review, tens of percent of the reads carry `pt:i=0` against about 1 % in the direct-RNA sample. A high `pt:i=0` rate means less poly(A) evidence per locus, hence fewer 3' variants AIDRS can distinguish and more coordinates that fall back to the read-level mode.
+Barcode / SeqTagger libraries carry a **library-level** `pt:i=0` rate that is much higher than a direct-RNA library, and it differs strongly between libraries of the same cohort. Measured on the RNA-004 barcode cohort (two runs): the per-library rate ranges from 4.4–11.4 % for most libraries up to 30.5–40.9 % for one of them. A high `pt:i=0` rate means less poly(A) evidence per locus, hence fewer 3' variants AIDRS can distinguish and more coordinates that fall back to the read-level mode.
 
-Check the distribution of your own BAM before choosing thresholds (the first command gives the denominator, the second the breakdown):
+Two measurement caveats that matter when you set thresholds:
+
+- **Measure the merged (pre-demux) BAM as well as the demuxed one.** Barcode assignment fails preferentially on `pt:i=0` reads, so demultiplexing *lowers* the measured `pt:i=0` rate: on the same cohort, 14.7 % of the merged pool became 11.6 % after demultiplexing, and 52 % of the discarded reads were `pt:i=0` reads. The post-demux number AIDRS sees is a biased-low estimate of the library's real rate.
+- **`pt:i=0` reads cannot be rescued.** In Dorado's `pa` tag the tail fields are `-1` on every `pt:i=0` read (checked on 56 154 reads and on a random sample of 8 273 reads), so there is no recoverable poly(A) evidence in those reads — only a different library preparation or a different basecalling configuration changes that.
+
+Check both numbers for your own data (the first command gives the denominator, the second the breakdown):
 
 ```bash
 samtools view -c your.bam
 samtools view your.bam | grep -o 'pt:i:[-0-9]*' | sort | uniq -c | sort -rn | head
 ```
 
-If `pt:i:0` dominates, the options are a library without barcoding, or accepting more read-level (rather than poly(A)-supported) 3' end placement.
+If `pt:i:0` dominates, the options are a library without barcoding, or accepting more read-level (rather than poly(A)-supported) 3' end placement — there is no threshold that recovers the lost evidence.
 
 Note what `--polya_fraction_threshold` (default `0.95`) actually does today: on the **default** path the poly(A) criterion is not consulted at all — it requires a poly(A) read-count column that production does not produce — so changing that flag has no effect on a default run; the poly(A) gate is live only under `--hard_filter`. Under `--hard_filter` the threshold is applied to every row as `polyA_frac > threshold`, and it does not gate NMD/truncation rows on their own. On a `pt`-less BAM `polyA_frac` is NaN, so the poly(A) criterion is bypassed (the 5' Puffin gate still applies).
 
