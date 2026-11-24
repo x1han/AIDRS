@@ -413,7 +413,10 @@ def isoform_validating(df, args, ref_anno=None):
             "polyA not measured). Stage 2.6 3-state filter will bypass the polyA gate; "
             "Stage 2.5b polyA pillar will use the genomic intra-priming check (if FASTA "
             "provided). _flnc_correct.ssc files are still written for isoform_quantification. "
-            "No aidrs.{transcript,gene}.polyA_len.parquet will be produced.",
+            "No aidrs.{transcript,gene}.polyA_len.parquet and no "
+            "aidrs.transcript.polya_per_sample.tsv will be produced (an all-zero "
+            "per-sample sidecar would be indistinguishable from 'measured zero' "
+            "evidence, which is the very confusion this skip avoids).",
             len(args.bam),
         )
         polyanno.correct_flnc_only(df, flnc_paths)
