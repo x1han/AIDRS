@@ -576,8 +576,9 @@ class IsoformAnnotator:
         """
         # Auto-detected polyA-skip path: bail before scanning flnc_correct.ssc.
         # The flnc_correct files exist (correct_flnc_only wrote them), but every
-        # row's polyA_len is 0 from the missing 'pt' tag, so aggregating would
-        # produce all-zero tables that are misleading rather than informative.
+        # row's polyA_len is the "tag missing" sentinel (-2) from the absent
+        # 'pt' tag, so aggregating would produce all-zero tables that are
+        # misleading rather than informative.
         if 'polyA_frac' not in df.columns or df['polyA_frac'].isna().all():
             logger.warning(
                 "[POLYA-AUTO-SKIP] No polyA_frac data on df; skipping "

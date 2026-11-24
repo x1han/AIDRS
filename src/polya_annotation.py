@@ -137,7 +137,11 @@ class polyAnnotator:
             cur = (
                 pl.from_pandas(read_df)
                 .with_columns(
-                    polyA_freq=(pl.col("polyA_len") != 0).cast(int),
+                    # Only a strictly positive length is a MEASURED poly(A)
+                    # tail. The Dorado sentinels (-1 anchor not found, -2 tag
+                    # missing) and the inestimable case (0) are all "no
+                    # measurement" and must not be counted as one.
+                    polyA_freq=(pl.col("polyA_len") > 0).cast(int),
                     Chr=pl.col("Chr").cast(str),
                     Strand=pl.col("Strand").cast(str),
                     SSC=pl.col("SSC").cast(str),

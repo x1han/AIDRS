@@ -10,7 +10,8 @@ Pinned contracts:
   its pt>0 reads only.
 - A2'-b (all-noise path): when DBSCAN finds no valid cluster, the pt>0 reads
   vote (threshold 3) and the all-read mode is the fallback.
-- pt=None and an all-zero pt reproduce the pre-A2' production result exactly.
+- pt=None, an all-zero pt and an all-negative pt reproduce the pre-A2'
+  production result exactly.
 - The pt column is only applied to the 3' side: '+' changes TrEnd only,
   '-' changes TrStart only.
 - The pt values follow the DBSCAN sample: they are re-indexed with the
@@ -106,6 +107,22 @@ def test_all_zero_pt_equals_production():
         expected = list(proc.get_representative_sites_DBSCAN(s.copy(), mode=mode))
         got = list(proc.get_representative_sites_DBSCAN(s.copy(), mode=mode, pt=p))
         assert got == expected
+
+
+def test_all_negative_pt_equals_production():
+    """The production no-pt case now writes a NEGATIVE sentinel (-2 tag
+    missing, -1 anchor not found) instead of 0. The estimator must treat
+    those exactly like the all-zero pt case."""
+    from src.bam2ssc import POLYA_LEN_ANCHOR_NOT_FOUND, POLYA_LEN_TAG_MISSING
+
+    proc = TerminalSitesProcessor()
+    values = [1000] * 40 + [990] * 60 + [1200] * 30
+    for negative in (POLYA_LEN_ANCHOR_NOT_FOUND, POLYA_LEN_TAG_MISSING):
+        s, p = _series(values, [negative] * len(values))
+        for mode in ("min", "max"):
+            expected = list(proc.get_representative_sites_DBSCAN(s.copy(), mode=mode))
+            got = list(proc.get_representative_sites_DBSCAN(s.copy(), mode=mode, pt=p))
+            assert got == expected
 
 
 # --- (d) strand handling: only the 3' side moves ---------------------------

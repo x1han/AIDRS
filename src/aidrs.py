@@ -398,8 +398,9 @@ def isoform_validating(df, args, ref_anno=None):
     logger.info("Stage 2.3: Performing PolyA fraction and length estimation...")
     polyanno = polyAnnotator(args)
     # Auto-detect: if NO input BAM had a 'pt' tag (Dorado polyA-tail marker),
-    # bam2ssc wrote all-zero polyA_len → polyA aggregation would produce
-    # polyA_frac=0 for every transcript, polluting Stage 2.6 3-state filter
+    # bam2ssc wrote the "tag missing" sentinel (-2) for every read → polyA
+    # aggregation would produce polyA_frac=0 for every transcript, polluting
+    # the Stage 2.6 3-state filter
     # (would classify everything as State 2 "measured zero" instead of the
     # correct State 3 "polyA not measured"). Skip the aggregation but still
     # emit _flnc_correct.ssc because isoform_quantification.py:39 needs it.
