@@ -104,12 +104,12 @@ Dorado's `pt:i` tag is the measured poly(A) tail length of a read:
 | `0` | the poly(A) anchor was found, but the tail length could not be estimated |
 | `-1` / tag absent | no poly(A) anchor was found |
 
-Barcode / SeqTagger libraries carry a **library-level** `pt:i=0` rate that is much higher than a direct-RNA library, and it differs strongly between libraries of the same cohort. Measured on the RNA-004 barcode cohort (two runs): the per-library rate ranges from 4.4–11.4 % for most libraries up to 30.5–40.9 % for one of them. A high `pt:i=0` rate means less poly(A) evidence per locus, hence fewer 3' variants AIDRS can distinguish and more coordinates that fall back to the read-level mode.
+Barcode / SeqTagger libraries carry a **library-level** `pt:i=0` rate that differs strongly between libraries of the same cohort. Measured on the RNA-004 barcode cohort (two runs): the per-library rate ranges from 4.4–11.4 % for most libraries up to 30.5–40.9 % for one of them. A high `pt:i=0` rate means less poly(A) evidence per locus, hence fewer 3' variants AIDRS can distinguish and more coordinates that fall back to the read-level mode.
 
 Two measurement caveats that matter when you set thresholds:
 
 - **Measure the merged (pre-demux) BAM as well as the demuxed one.** Barcode assignment fails preferentially on `pt:i=0` reads, so demultiplexing *lowers* the measured `pt:i=0` rate: on the same cohort, 14.7 % of the merged pool became 11.6 % after demultiplexing, and 52 % of the discarded reads were `pt:i=0` reads. The post-demux number AIDRS sees is a biased-low estimate of the library's real rate.
-- **`pt:i=0` reads cannot be rescued.** In Dorado's `pa` tag the tail fields are `-1` on every `pt:i=0` read (checked on 56 154 reads and on a random sample of 8 273 reads), so there is no recoverable poly(A) evidence in those reads — only a different library preparation or a different basecalling configuration changes that.
+- **`pt:i=0` reads cannot be rescued.** In Dorado's `pa` tag the tail fields are `-1` on every `pt:i=0` read — checked on 56 154 reads in one run and on a 2 % random sample of the merged pool in the other (37 261 `pt:i=0` reads, 0 exceptions; more than 90 000 `pt:i=0` reads in total) — so there is no recoverable poly(A) evidence in those reads. Only a different library preparation or a different basecalling configuration changes that.
 
 Check both numbers for your own data (the first command gives the denominator, the second the breakdown):
 
