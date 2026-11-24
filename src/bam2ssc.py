@@ -570,7 +570,7 @@ def merge_single_bam(bam, files, out_dir):
     out1 = os.path.join(out_dir, f'{bam_basename}_flnc.ssc')
     out2 = os.path.join(out_dir, f'{bam_basename}_ssc.count')
     # Sentinel file: aidrs.py reads this to decide whether to skip polyAnnotator
-    # end-to-end (no 'pt' tag → all reads had polya_len=0 from missing tag,
+    # end-to-end (no 'pt' tag → all reads had polya_len=-2 from the missing tag,
     # so polyA aggregation would just produce all-zero polyA_frac, polluting
     # downstream Stage 2.6 3-state filter).
     out_has_polya = os.path.join(out_dir, f'{bam_basename}.has_polya')
