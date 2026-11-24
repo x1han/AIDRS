@@ -142,6 +142,7 @@ See [Quantification (Counts & CPM)](#quantification-counts--cpm) for what reads 
 ### Optional Output
 
 - `aidrs.transcript.polyA_len.parquet` / `aidrs.gene.polyA_len.parquet`: Poly(A) tail-length sidecars. See [Poly(A) Length Outputs](#polya-length-outputs).
+- `aidrs.transcript.polya_per_sample.tsv`: Per-sample poly(A) statistics behind the `polyA_frac` column (one row per transcript and sample: `polyA_freq`, `raw_read_freq`, `polyA_frac`). Written only when poly(A) was measured, i.e. not on a `pt`-less BAM. See [Poly(A) Length Outputs](#polya-length-outputs).
 - With `--keep_temp`, the full `temp/` directory is preserved, including per-sample `*_flnc_correct.ssc` files (read-level SSC with alignment details).
 
 ---
@@ -149,6 +150,14 @@ See [Quantification (Counts & CPM)](#quantification-counts--cpm) for what reads 
 ## Poly(A) Length Outputs
 
 When the input BAM carries per-read polyA tail lengths (typically emitted by Dorado basecalling), AIDRS writes two Parquet sidecar tables `aidrs.transcript.polyA_len.parquet` / `aidrs.gene.polyA_len.parquet` alongside `aidrs.transcript.assessment.tsv`. 
+
+### How `polyA_frac` is computed
+
+The `polyA_frac` column of `aidrs.transcript.assessment.tsv` is the **unweighted median of the per-sample poly(A) fractions** over the samples that carry measured poly(A) evidence for that transcript — a sample qualifies when it has at least 5 reads on the transcript **and** at least one read with a measured tail. When no sample qualifies, the value falls back to the read-depth-weighted pooled ratio.
+
+This is deliberate: a read-depth-weighted pooled ratio lets one abnormally deep library (or one library whose tails are systematically shorter) dominate the cohort's poly(A) evidence. With the median, a single abnormal library can no longer drag the whole cohort down. The per-sample numbers behind the value are delivered in `aidrs.transcript.polya_per_sample.tsv` (one row per transcript and sample), so the statistic stays auditable.
+
+Two consequences to keep in mind: on a **single-library** run the median and the pooled ratio are the same number, so nothing changes there; and on a **multi-library** run the `polyA_frac` values change compared to earlier versions (the pooled value is no longer what the column holds).
 
 ---
 
