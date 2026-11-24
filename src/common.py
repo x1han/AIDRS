@@ -277,24 +277,106 @@ def filter_fragmentary_transcript(df, threshold_fragmentary_transcript_bp=50):
     
     return df
 
-def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fraction_threshold=0.95, hard_filter=False, genome_fasta=None):
+def puffin_value_below_threshold(value, threshold):
+    """Whether a Puffin_TSS_* value fails the confidence threshold.
+
+    The captured / delivered assessment stores the Puffin score as TEXT: 'no'
+    for "no peak found", every other value is the number written as a string.
+    A plain ``value < threshold`` comparison therefore works in memory (the
+    column holds a float) and silently stops working after a TSV round trip
+    (the column holds a string), which makes a re-read run more permissive
+    than the run that produced the file. This helper accepts both
+    representations, so the in-memory path and the TSV round-trip path
+    delete exactly the same rows.
+
+    'no' always fails the gate. A missing value (NaN / None) never fails it:
+    that is the current in-memory behaviour and it is kept deliberately.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower() == 'no':
+            return True
+        number = pd.to_numeric(text, errors='coerce')
+        return bool(pd.notna(number) and number < threshold)
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        return bool(value < threshold)
+    except TypeError:
+        return False
+
+
+def polya_criterion_mask(mask_state1, mask_state2, polyA_frac,
+                         polya_fraction_threshold, has_polya_info,
+                         mask_state2_kept, disable_polya_filter=False):
+    """The ONE poly(A) decision, shared by the default path and --hard_filter.
+
+    The two filter paths used to judge the poly(A) evidence differently (the
+    default path asked whether the frame carried any poly(A) measurement at
+    all, the hard path ignored the question entirely), which is why the
+    default path's poly(A) penalty had never been live in production.
+
+    The three states:
+      State 1  polyA_frac > 0   -- a poly(A) tail was detected
+      State 2  polyA_frac == 0  -- the key was measured, no tail was detected
+      State 3  polyA_frac NaN   -- no poly(A) evidence for this key
+
+    The decision (mask_polya_ok, True = the row passes the criterion):
+      - no poly(A) evidence in the frame, or the filter disabled -> True
+        (bypass: "no measurement" must never be a penalty)
+      - State 3 -> True (bypass)
+      - State 2 with an FSM rescue -> True
+      - State 1 -> polyA_frac > polya_fraction_threshold
+      - State 2 without a rescue -> False
+    """
+    mask_polya_ok = pd.Series(True, index=mask_state1.index)
+    if (not has_polya_info) or disable_polya_filter:
+        return mask_polya_ok
+    mask_polya_ok.loc[mask_state1] = (
+        polyA_frac.loc[mask_state1].gt(polya_fraction_threshold).values
+    )
+    mask_polya_ok.loc[mask_state2 & ~mask_state2_kept] = False
+    return mask_polya_ok
+
+
+def transcript_model_filtering(df, puffin_prediction_threshold=0.02,
+                               polya_fraction_threshold=0.95,
+                               hard_filter=False, genome_fasta=None,
+                               disable_polya_filter=False):
     """
     Apply TSS correction and filtering to dataframe
 
     Requirements:
     1. After obtaining the tss_col corresponding to strand, if the tuple in the Puffin_TSS_15bp column does not contain 'no',
        then tss_col is modified to tss_col+Puffin_TSS_15bp[0]
-    2. If the value in the Predict_NMD column is 'NMD' and (Puffin_TSS_50bp value has 'no' or polyA_frac value is less than polya_fraction_threshold),
-       then delete this row
-    3. If the value in the truncation column is 'yes' and (Puffin_TSS_50bp value has 'no' or polyA_frac value is less than polya_fraction_threshold),
-       then delete this row
+    2. If the value in the Predict_NMD column is 'NMD' and (the 5' Puffin gate
+       fails OR the poly(A) criterion fails), then delete this row
+    3. If the value in the truncation column is 'yes' and (the 5' Puffin gate
+       fails OR the poly(A) criterion fails), then delete this row
+    4. If the 5' Puffin gate fails AND the poly(A) criterion fails, then
+       delete this row (the ultra-low-quality branch). A low poly(A) fraction
+       on its own deletes nothing.
+
+    The poly(A) criterion (see polya_criterion_mask) passes when
+    polyA_frac > polya_fraction_threshold (State 1), fails when the key was
+    measured and no tail was detected (State 2, polyA_frac == 0) and is
+    bypassed when there is no poly(A) evidence for the key (State 3, NaN).
+    The 5' Puffin gate fails when the Puffin_TSS_50bp value is 'no' or below
+    puffin_prediction_threshold.
 
     Parameters
     ----
     genome_fasta : pysam.FastaFile or None
         Reference genome FASTA, required ONLY for the 3-state polyA rescue
-        (Stage 2.5b). When None (default), behavior is byte-identical to the
-        legacy single-state polyA logic (State 2 -> filter, State 3 -> bypass).
+        (Stage 2.5b). When None, a State 2 row (polyA_frac == 0, measured but
+        all-zero) is filtered like any other State 2 row -- the FSM rescue
+        needs the genome because the rescue block is guarded by it. The CLI
+        requires --reference, so this only matters for a library call.
         When provided, State 2 rows (polyA_frac == 0, measured but all-zero)
         are subject to:
           - FSM rescue: keep when category == 'FSM' (e.g. replication-dependent
@@ -304,27 +386,46 @@ def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fract
             A-rich window). If intra-priming is detected, filter (oligo-dT
             primed at internal A-rich region -> artifact). If NOT detected,
             keep (genuine non-polyadenylated transcript).
+    disable_polya_filter : bool
+        Escape hatch: switch the poly(A) criterion off entirely (both the
+        default path's joint gate and --hard_filter). The 5' Puffin gate
+        still applies.
     """
     # Capture input row count before any filtering for Stage 2.6 observability
     n_before = len(df)
 
     # ----------------------------------------------------------------------
-    # Sample-level polyA modality check (Stage A R2 fix for -polyA datasets)
+    # poly(A) modality check (Stage A R2 fix for -polyA datasets)
     # ----------------------------------------------------------------------
-    # When the entire sample lacks polyA measurements (e.g., BAM without
+    # When the entire frame lacks polyA measurements (e.g., BAM without
     # pt:i tags, or polyA module never produced any signal), bypass all
     # polyA penalties rather than treating "missing data" as a death
     # penalty. This addresses the failure mode observed in Case 2 (-polyA
-    # C107 chr1): polyA_valid_reads=0 for every row -> State 2 mask all
-    # True -> polya_frac_low_rowwise all True -> all three gates (NMD,
-    # truncation, ultra-low-quality) trigger unconditionally -> 75% row
-    # loss (5954 -> 1461). With this guard, the 3-condition framework
-    # collapses to the 5' Puffin-only gate, restoring the user's intent
-    # that "no polyA info" is neutral, not penalising.
+    # C107 chr1): every row fell into State 2 -> polya_frac_low_rowwise
+    # all True -> all three gates (NMD, truncation, ultra-low-quality)
+    # trigger unconditionally -> 75% row loss (5954 -> 1461). With this
+    # guard, the 3-condition framework collapses to the 5' Puffin-only gate,
+    # restoring the user's intent that "no polyA info" is neutral, not
+    # penalising.
+    # The poly(A) evidence test rests on the products that actually exist:
+    # the per-key poly(A) statistic of Stage 2.3. The previous test also
+    # demanded the 'polyA_valid_reads' column, which the production path
+    # never produces for multi-exon rows (only the single-exon funnel pads it
+    # with 0), so the conjunction was always False and the default path's
+    # poly(A) penalty was inert in every production run.
+    # A frame counts as "measured" when it carries at least one non-NaN value
+    # AND at least one positive value: a frame whose every key is a measured
+    # zero has no usable poly(A) evidence and must not be penalised.
+    # This test is frame-level, so it applies to BOTH paths: a frame whose
+    # every value is a measured zero bypasses the poly(A) criterion in
+    # --hard_filter as well, which loosens the hard mode for that (rare)
+    # cohort shape. Documented in the README.
+    # A pt-less BAM never reaches this point with values -- Stage 2.3 sets
+    # polyA_frac to NaN for the whole frame in that case.
     has_polya_info = (
-        ("polyA_valid_reads" in df.columns)
-        and (df["polyA_valid_reads"].fillna(0).sum() > 0)
+        ("polyA_frac" in df.columns)
         and df["polyA_frac"].notna().any()
+        and (pd.to_numeric(df["polyA_frac"], errors="coerce") > 0).any()
     )
 
     # Lazy import intra-priming checker ONLY when genome_fasta is provided.
@@ -357,17 +458,18 @@ def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fract
         # ------------------------------------------------------------------
         # 3-state polyA mask construction (shared by both filter paths below)
         # ------------------------------------------------------------------
-        # State 1 (positive): polyA_frac > 0 (some reads had pt:i > 0)
-        # State 2 (measured zero): polyA_frac == 0 AND polyA_valid_reads == 0
-        #   (all reads had pt:i = 0 -- strong experimental negative signal)
-        # State 3 (missing): polyA_frac is NaN (polyA was not measured at all)
+        # State 1 (positive): polyA_frac > 0 (some reads had a measured tail)
+        # State 2 (measured zero): polyA_frac == 0 (the key was measured and
+        #   no read on it carried a measured tail -- a strong negative signal)
+        # State 3 (missing): polyA_frac is NaN (no poly(A) evidence for the key)
         # ------------------------------------------------------------------
-        polya_frac = df_group['polyA_frac']
-        polyA_valid_reads = df_group.get('polyA_valid_reads', pd.Series([0] * len(df_group), index=df_group.index))
-        polyA_valid_reads = pd.to_numeric(polyA_valid_reads, errors='coerce').fillna(0).astype(int)
+        # State 2 is "the key was measured and no poly(A) tail was detected".
+        # A key the per-key table does not cover carries NaN (State 3), so it
+        # can no longer be mistaken for a measured zero.
+        polya_frac = pd.to_numeric(df_group['polyA_frac'], errors='coerce')
 
         mask_state1 = polya_frac.notna() & polya_frac.gt(0.0)
-        mask_state2 = polya_frac.notna() & polya_frac.eq(0.0) & polyA_valid_reads.eq(0)
+        mask_state2 = polya_frac.notna() & polya_frac.eq(0.0)
         mask_state3 = polya_frac.isna()
 
         # State 2 rescue masks (only meaningful when genome_fasta is provided)
@@ -408,18 +510,19 @@ def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fract
         # Non-FSM State 2 rows go through the standard 3-condition framework.
         mask_state2_kept = mask_state2_fsm
 
-        # Per-row polya_frac_low (used by non-hard_filter path). Mirrors the
-        # legacy polya_frac_low definition but is now state-aware:
-        #   State 1 -> polya_frac < threshold
-        #   State 2 -> True unless FSM-rescued (Q-A2: non-FSM must satisfy
-        #             the 3-condition framework, primarily the 5' Puffin gate)
-        #   State 3 -> False (bypass; no polyA evidence => no penalty)
-        polya_frac_low_rowwise = pd.Series(False, index=df_group.index)
-        polya_frac_low_rowwise.loc[mask_state1] = (
-            df_group.loc[mask_state1, 'polyA_frac'].lt(polya_fraction_threshold).values
+        # The ONE poly(A) decision (see polya_criterion_mask); both filter
+        # paths use it, so the default path and --hard_filter now judge the
+        # poly(A) evidence identically:
+        #   State 1 -> passes when polyA_frac > threshold
+        #   State 2 -> passes only with the FSM rescue
+        #   State 3 -> bypass (no poly(A) evidence => no penalty)
+        mask_polya_ok = polya_criterion_mask(
+            mask_state1, mask_state2, polya_frac,
+            polya_fraction_threshold, has_polya_info,
+            mask_state2_kept, disable_polya_filter=disable_polya_filter,
         )
-        polya_frac_low_rowwise.loc[mask_state2] = ~mask_state2_kept.loc[mask_state2].values
-        # State 3 stays False (bypass)
+        # The default path consumes it as the "poly(A) is low" flag.
+        polya_frac_low_rowwise = ~mask_polya_ok
 
         # Accumulate observability counters for this group
         state_counts['state1_pos'] += int(mask_state1.sum())
@@ -437,16 +540,11 @@ def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fract
             df_group_sub = df_group.copy()
             df_group_sub['Puffin_TSS_15bp'] = pd.to_numeric(df_group_sub['Puffin_TSS_15bp'], errors='coerce')  # 'no' -> NaN
 
-            # State-aware polyA keep mask:
-            #   State 1 -> polyA_frac > threshold
-            #   State 2 -> FSM-rescued OR NOT intra-priming
-            #   State 3 -> bypass (NaN)
+            # The same poly(A) decision as the default path
+            # (polya_criterion_mask): State 1 passes above the threshold,
+            # State 2 only with the FSM rescue, State 3 bypasses.
             mask_puffin = df_group_sub['Puffin_TSS_15bp'].gt(puffin_prediction_threshold)
-            mask_polya_kept = (
-                df_group_sub['polyA_frac'].gt(polya_fraction_threshold)
-                | mask_state2_kept
-                | df_group_sub['polyA_frac'].isna()
-            )
+            mask_polya_kept = mask_polya_ok
             mask_to_keep = mask_puffin & mask_polya_kept
 
             if df_group_sub['polyA_frac'].isna().all():
@@ -460,9 +558,13 @@ def transcript_model_filtering(df, puffin_prediction_threshold=0.02, polya_fract
         else:
             def should_filter_row(row, _polya_low=polya_frac_low_rowwise, _has_polya_info=has_polya_info):
                 # Check if Puffin_TSS_50bp is 'no' or less than puffin_prediction_threshold
+                # The captured / delivered column holds the score as TEXT, so
+                # the comparison has to be type-tolerant: a plain numeric
+                # comparison would die after a TSV round trip and make the
+                # re-read run keep rows the in-memory run deletes.
                 puffin_50bp_value = row['Puffin_TSS_50bp']
-                puffin_50bp_has_no = (puffin_50bp_value == 'no' or
-                                     (isinstance(puffin_50bp_value, (int, float)) and puffin_50bp_value < puffin_prediction_threshold))
+                puffin_50bp_has_no = puffin_value_below_threshold(
+                    puffin_50bp_value, puffin_prediction_threshold)
 
                 # State-aware polyA low flag with sample-level bypass (Stage A R2).
                 # When the ENTIRE sample has no polyA measurements, polyA penalty

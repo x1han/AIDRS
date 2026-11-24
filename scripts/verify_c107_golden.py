@@ -66,8 +66,11 @@ from pathlib import Path
 
 import pandas as pd
 
-# The pinned golden of the C107 100k assessment (after the A2'/A2'-b change).
-GOLDEN_SHA256 = "c289f84d1899b2dd45088200cde8334e867bae7416ece05c23283a4a6d69b440"
+# The pinned golden of the C107 100k assessment (after the A2'/A2'-b change
+# and the activation of the default path's poly(A) gate; 1 015 models).
+# The previous golden c289f84d... (1 019 models) is the digest of the
+# --disable_polya_filter run: the gate alone is what changed the model set.
+GOLDEN_SHA256 = "004fbc40c3ecdf75c346b86250db168661ae053fedd33d5429a51eca1929d1fe"
 
 ASSESSMENT = "aidrs.transcript.assessment.tsv"
 # The five quantification files: they must be byte-identical in mode (b).

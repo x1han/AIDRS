@@ -551,6 +551,7 @@ def isoform_validating(df, args, ref_anno=None):
         args.polya_fraction_threshold,
         args.hard_filter,
         genome_fasta=genome_fasta,
+        disable_polya_filter=getattr(args, 'disable_polya_filter', False),
     )
     df = stage_boundary_check("2.6", _df26_before, df, args.strict_stage_checks, args.allow_zero_rows, output_dir=args.output)
     logger.info(f"TSS correction and filtering completed. Retained {len(df)} records.")
@@ -766,6 +767,11 @@ def parse_args(cmd_args):
         help="Skip Stage 2.4 TranslationAI. Output has TIS/TTS='no' and Predict_NMD='no_orf'; "
              "CDS/UTR annotations in the GTF output will be empty.")
     func.add_argument("--hard_filter", action="store_true", help="Hard filtering based on Puffin_TSS_15bp and polyA_frac thresholds.")
+    func.add_argument("--disable_polya_filter", action="store_true",
+                        help="Escape hatch: switch the Stage 2.6 poly(A) criterion off entirely "
+                             "(the default path's joint gate and --hard_filter alike). "
+                             "Use it when the poly(A) evidence of a cohort is broken; the "
+                             "5' Puffin gate still applies. Default: off.")
 
     # === Quantification (Stage 3) ===
     quant = parser.add_argument_group("Quantification (Stage 3)")
