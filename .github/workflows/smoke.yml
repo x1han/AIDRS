@@ -47,6 +47,7 @@ jobs:
           pytest tests/test_defensive.py tests/test_integration.py \
                  tests/test_generate_reports_characterization.py \
                  tests/test_smoke.py \
+                 tests/test_verify_c107_golden.py \
                  -v --tb=short --durations=10
 
       - name: Upload pytest JUnit report on failure
