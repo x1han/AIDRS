@@ -281,6 +281,13 @@ class polyAnnotator:
                     f"{len(per_sample)} rows became {len(table)}. The aggregate must "
                     f"hold exactly one row per key."
                 )
+            if not table['polyA_frac_model'].notna().all():
+                n_missing = int(table['polyA_frac_model'].isna().sum())
+                raise RuntimeError(
+                    f"[POLYA-SIDECAR] {n_missing} per-sample row(s) have no per-key "
+                    f"aggregate. A key that the aggregation does not cover must not "
+                    f"be delivered as a pooled fallback."
+                )
             table['estimator'] = np.where(table['polyA_n_samples'] > 0,
                                           'median', 'pooled_fallback')
         else:

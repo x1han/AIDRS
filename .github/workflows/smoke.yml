@@ -44,14 +44,9 @@ jobs:
         shell: bash -l {0}
         run: |
           cd "$GITHUB_WORKSPACE"
-          pytest tests/test_defensive.py tests/test_integration.py \
-                 tests/test_generate_reports_characterization.py \
-                 tests/test_smoke.py \
-                 tests/test_verify_c107_golden.py \
-                 tests/test_polya_sentinel.py \
-                 tests/test_polya_median.py \
-                 tests/test_polyA_terminal_estimator.py \
-                 -v --tb=short --durations=10 --junitxml=pytest-report.xml
+          # The whole tests/ directory: an explicit file list silently skips
+          # every test file that is added later.
+          pytest tests/ -v --tb=short --durations=10 --junitxml=pytest-report.xml
 
       - name: Upload pytest JUnit report on failure
         if: failure()

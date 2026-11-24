@@ -355,9 +355,9 @@ def test_a_multi_library_reference_run_is_flagged(tmp_path, capsys):
     d = tmp_path / "cand"
     d.mkdir()
     _write_counts_with_libraries(d, 6)
-    vgate.print_sample_count(d)
+    vgate.print_sample_count(d, "candidate")
     out = capsys.readouterr().out
-    assert "reference sample count: 6" in out
+    assert "candidate library count: 6" in out
     assert "WARNING" in out
 
 
@@ -365,15 +365,24 @@ def test_a_single_library_reference_run_is_not_flagged(tmp_path, capsys):
     d = tmp_path / "cand"
     d.mkdir()
     _write_counts_with_libraries(d, 1)
-    vgate.print_sample_count(d)
+    vgate.print_sample_count(d, "candidate")
     out = capsys.readouterr().out
-    assert "reference sample count: 1" in out
+    assert "candidate library count: 1" in out
     assert "WARNING" not in out
 
 
 def test_an_unreadable_quantification_file_is_reported_as_unknown(tmp_path, capsys):
     d = tmp_path / "cand"
     d.mkdir()
-    vgate.print_sample_count(d)
+    vgate.print_sample_count(d, "candidate")
     out = capsys.readouterr().out
     assert "unknown" in out
+
+
+def test_an_unexpected_quantification_header_is_reported_as_unknown(tmp_path):
+    """The id columns are known by name; if the header moves, the gate must
+    report 'unknown' instead of guessing a library count."""
+    d = tmp_path / "cand"
+    d.mkdir()
+    (d / "aidrs.transcript.counts.tsv").write_text("a\tb\tc\td\n")
+    assert vgate.count_reference_samples(d) is None

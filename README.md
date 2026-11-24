@@ -147,7 +147,7 @@ See [Quantification (Counts & CPM)](#quantification-counts--cpm) for what reads 
 ### Optional Output
 
 - `aidrs.transcript.polyA_len.parquet` / `aidrs.gene.polyA_len.parquet`: Poly(A) tail-length sidecars. See [Poly(A) Length Outputs](#polya-length-outputs).
-- `aidrs.transcript.polya_per_sample.tsv`: Per-sample poly(A) statistics behind the `polyA_frac` column, one row per transcript key and sample: `polyA_freq`, `raw_read_freq`, `polyA_frac` (the per-sample ratio), plus the per-key aggregate `polyA_frac_model` (the value the model received), `polyA_frac_pooled`, `polyA_n_samples` and `estimator` (`median` or `pooled_fallback`). Its key space is the Stage 2.3 *read* key space, a superset of the delivered model, and a model key with no reads has no row here. Written only when poly(A) was measured, i.e. not on a `pt`-less BAM. See [Poly(A) Length Outputs](#polya-length-outputs).
+- `aidrs.transcript.polya_per_sample.tsv`: Per-sample poly(A) statistics behind the `polyA_frac` column, one row per transcript key and sample: `polyA_freq`, `raw_read_freq`, `polyA_frac` (the per-sample ratio), plus the per-key aggregate `polyA_frac_model` (the value the model received when the key is a model key), `polyA_frac_pooled`, `polyA_n_samples` and `estimator` (`median` or `pooled_fallback`). Its key space is the Stage 2.3 *read* key space, a superset of the delivered model, and a model key with no reads has no row here. Written only when poly(A) was measured, i.e. not on a `pt`-less BAM. See [Poly(A) Length Outputs](#polya-length-outputs).
 - With `--keep_temp`, the full `temp/` directory is preserved, including per-sample `*_flnc_correct.ssc` files (read-level SSC with alignment details).
 
 ---

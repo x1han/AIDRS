@@ -355,7 +355,7 @@ def compare_quant_files(baseline_dir: Path, candidate_dir: Path) -> list:
 
 # The quantification header carries the id columns first, then one column per
 # library.
-QUANT_ID_COLUMNS = 3
+QUANT_ID_COLUMNS = ["TrID", "GeneID", "GeneName"]
 
 
 def count_reference_samples(output_dir: Path):
@@ -368,21 +368,24 @@ def count_reference_samples(output_dir: Path):
             header = fh.readline().rstrip("\n").split("\t")
     except OSError:
         return None
-    n = len(header) - QUANT_ID_COLUMNS
+    if not header[:len(QUANT_ID_COLUMNS)] == QUANT_ID_COLUMNS:
+        # An unexpected header: do not guess, report "unknown".
+        return None
+    n = len(header) - len(QUANT_ID_COLUMNS)
     return n if n > 0 else None
 
 
-def print_sample_count(output_dir: Path) -> None:
-    """Print the reference sample count and warn when the golden's invariant
-    (at most one sample contributing reads per key) no longer holds."""
+def print_sample_count(output_dir: Path, label: str = "candidate") -> None:
+    """Print the library count and warn when the golden's invariant (at most
+    one sample contributing reads per key) no longer holds."""
     n = count_reference_samples(output_dir)
     if n is None:
-        print("reference sample count: unknown "
+        print(f"{label} library count: unknown "
               "(aidrs.transcript.counts.tsv not readable)")
         return
-    print(f"reference sample count: {n}")
+    print(f"{label} library count: {n}")
     if n > 1:
-        print(f"WARNING: the reference run carries {n} libraries. The pinned "
+        print(f"WARNING: the {label} run carries {n} libraries. The pinned "
               "golden's polyA_frac can only stay put while at most one sample "
               "contributes reads to a key; a second library legitimately moves "
               "polyA_frac for the keys it reaches and forces a re-baseline "
@@ -410,7 +413,7 @@ def main(argv=None) -> int:
 
     digest = sha256_file(cand_assess)
     print(f"candidate assessment sha256: {digest}")
-    print_sample_count(candidate_dir)
+    print_sample_count(candidate_dir, "candidate")
 
     baseline_dir = Path(args.baseline) if args.baseline else None
     base_digest = None
@@ -422,6 +425,7 @@ def main(argv=None) -> int:
         base_digest = sha256_file(base_assess)
         label = f" ({args.baseline_label})" if args.baseline_label else ""
         print(f"baseline  assessment sha256: {base_digest}{label}")
+        print_sample_count(baseline_dir, "baseline")
         if args.baseline_sha and args.baseline_sha.lower() != base_digest:
             print(f"FAIL: the baseline assessment sha256 is {base_digest}, "
                   f"but {args.baseline_sha.lower()} was expected")

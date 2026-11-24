@@ -274,13 +274,21 @@ def test_the_sidecar_carries_the_per_key_aggregate(tmp_path):
     assert len(table) == 2
     assert not table.duplicated(subset=POLYA_MERGE_COLS + ["sample"]).any()
 
-    # the per-key aggregate is on every row of the key
+    # the per-key aggregate is on EVERY row of the key
+    assert table["polyA_frac_model"].notna().all()
     assert table["polyA_frac_model"].nunique() == 1
     assert table["polyA_frac_model"].iloc[0] == pytest.approx(df["polyA_frac"].iloc[0])
     assert table["polyA_frac_pooled"].iloc[0] == pytest.approx(
         df["polyA_frac_pooled"].iloc[0])
     assert table["polyA_n_samples"].iloc[0] == df["polyA_n_samples"].iloc[0]
     assert set(table["estimator"].unique()) == {"median"}
+
+    # the per-sample column still holds the PER-SAMPLE ratio (1.0 and 0.1),
+    # not the cohort aggregate (0.55)
+    ratios = dict(zip(table["sample"], table["polyA_frac"]))
+    assert ratios["S1"] == pytest.approx(1.0)
+    assert ratios["S2"] == pytest.approx(0.1)
+    assert df["polyA_frac"].iloc[0] == pytest.approx(0.55)
 
 
 def test_the_sidecar_flags_the_pooled_fallback(tmp_path):
