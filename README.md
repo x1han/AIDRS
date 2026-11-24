@@ -137,7 +137,7 @@ The current version does **not** assemble genes whose transcripts are all single
 ### Main Output
 
 - `aidrs.transcript_model.gtf`: Final filtered transcript models (including known and novel isoforms).
-- `aidrs.transcript.assessment.tsv`: Transcript model assessment statistics (19-column canonical schema).
+- `aidrs.transcript.assessment.tsv`: Transcript model assessment statistics (19-column canonical schema). The two `Puffin_TSS_*` columns are text: `no` means "no peak found", every other value is the numeric score written as a string — convert them before comparing with a threshold, otherwise a text value silently fails the numeric comparison (AIDRS's own 5' gate tests the value's type, not its text).
 - `aidrs.transcript.counts.tsv` / `aidrs.transcript.cpm.tsv`: Per-sample raw counts and CPM matrices at the transcript level.
 - `aidrs.gene.counts.tsv` / `aidrs.gene.cpm.tsv`: Per-sample raw counts and CPM matrices at the gene level.
 - `aidrs.gene.model_map.tsv`: For every gene of the gene layer, whether it is in the transcript model and how many of its transcripts are. See [Quantification (Counts & CPM)](#quantification-counts--cpm).
