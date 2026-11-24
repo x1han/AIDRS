@@ -90,19 +90,22 @@ Mode (a) pins the assessment only — a regression confined to the counts/CPM la
 
 Byte-level comparisons need the usual preconditions: an isolated `TMPDIR` per run (a shared `TMPDIR` produces a spurious 2-row difference), the same BAM file name, `--threads` pinned, and no other AIDRS run on the same box. Produce the baseline from a pinned commit (`git archive <sha>`) and record that sha with `--baseline-label`, which is echoed into the receipt.
 
+The pinned golden assumes that at most one library contributes reads to a key: only then are the pooled ratio and the unweighted median the same number, and only then is the `polyA_frac` column guaranteed not to move. The gate reads the library count from the quantification header and prints it in the receipt; when it is greater than one it warns, because a second library legitimately moves `polyA_frac` for the keys its reads reach and forces a re-baseline (record the new sha and its cause).
+
 ---
 
 ## ⚠️ Known Limitations
 
 ### Barcode / SeqTagger libraries and the `pt:i=0` rate
 
-Dorado's `pt:i` tag is the measured poly(A) tail length of a read:
+Dorado's `pt:i` tag is the measured poly(A) tail length of a read. AIDRS keeps the failure states distinct in its internal `polyA_len` column; only a strictly positive length counts as evidence:
 
-| `pt:i` | meaning |
-| --- | --- |
-| `> 0` | a poly(A) tail was measured — this is the evidence AIDRS uses to place a 3' end |
-| `0` | the poly(A) anchor was found, but the tail length could not be estimated |
-| `-1` / tag absent | no poly(A) anchor was found |
+| `pt:i` | AIDRS `polyA_len` | meaning |
+| --- | --- | --- |
+| `> 0` | `> 0` | a poly(A) tail was measured — this is the evidence AIDRS uses to place a 3' end |
+| `0` | `0` | the poly(A) anchor was found, but the tail length could not be estimated |
+| `-1` | `-1` | no poly(A) anchor was found |
+| tag absent | `-2` | the read carries no `pt` tag at all (AIDRS's own sentinel; Dorado never writes `-2`) |
 
 Barcode / SeqTagger libraries carry a **library-level** `pt:i=0` rate that differs strongly between libraries of the same cohort. Measured on the RNA-004 barcode cohort (two runs): the per-library rate ranges from 4.4–11.4 % for most libraries up to 30.5–40.9 % for one of them. A high `pt:i=0` rate means less poly(A) evidence per locus, hence fewer 3' variants AIDRS can distinguish and more coordinates that fall back to the read-level mode.
 
@@ -144,7 +147,7 @@ See [Quantification (Counts & CPM)](#quantification-counts--cpm) for what reads 
 ### Optional Output
 
 - `aidrs.transcript.polyA_len.parquet` / `aidrs.gene.polyA_len.parquet`: Poly(A) tail-length sidecars. See [Poly(A) Length Outputs](#polya-length-outputs).
-- `aidrs.transcript.polya_per_sample.tsv`: Per-sample poly(A) statistics behind the `polyA_frac` column (one row per transcript and sample: `polyA_freq`, `raw_read_freq`, `polyA_frac`). Written only when poly(A) was measured, i.e. not on a `pt`-less BAM. See [Poly(A) Length Outputs](#polya-length-outputs).
+- `aidrs.transcript.polya_per_sample.tsv`: Per-sample poly(A) statistics behind the `polyA_frac` column, one row per transcript key and sample: `polyA_freq`, `raw_read_freq`, `polyA_frac` (the per-sample ratio), plus the per-key aggregate `polyA_frac_model` (the value the model received), `polyA_frac_pooled`, `polyA_n_samples` and `estimator` (`median` or `pooled_fallback`). Its key space is the Stage 2.3 *read* key space, a superset of the delivered model, and a model key with no reads has no row here. Written only when poly(A) was measured, i.e. not on a `pt`-less BAM. See [Poly(A) Length Outputs](#polya-length-outputs).
 - With `--keep_temp`, the full `temp/` directory is preserved, including per-sample `*_flnc_correct.ssc` files (read-level SSC with alignment details).
 
 ---
@@ -155,9 +158,9 @@ When the input BAM carries per-read polyA tail lengths (typically emitted by Dor
 
 ### How `polyA_frac` is computed
 
-The `polyA_frac` column of `aidrs.transcript.assessment.tsv` is the **unweighted median of the per-sample poly(A) fractions** over the samples that carry measured poly(A) evidence for that transcript — a sample qualifies when it has at least 5 reads on the transcript **and** at least one read with a measured tail. When no sample qualifies, the value falls back to the read-depth-weighted pooled ratio.
+The `polyA_frac` column of `aidrs.transcript.assessment.tsv` is the **unweighted median of the per-sample poly(A) fractions** over the samples that carry measured poly(A) evidence for that transcript — a sample qualifies when it has at least 5 reads on the transcript **and** at least one read with a measured tail. With an even number of qualifying samples the median is the mean of the two middle values (the numpy convention). When no sample qualifies, the value falls back to the read-depth-weighted pooled ratio.
 
-This is deliberate: a read-depth-weighted pooled ratio lets one abnormally deep library (or one library whose tails are systematically shorter) dominate the cohort's poly(A) evidence. With the median, a single abnormal library can no longer drag the whole cohort down. The per-sample numbers behind the value are delivered in `aidrs.transcript.polya_per_sample.tsv` (one row per transcript and sample), so the statistic stays auditable.
+This is deliberate: a read-depth-weighted pooled ratio lets one abnormally deep library (or one library whose tails are systematically shorter) dominate the cohort's poly(A) evidence. With the median, a single abnormal library can no longer drag the whole cohort down. The per-sample numbers behind the value are delivered in `aidrs.transcript.polya_per_sample.tsv` (one row per transcript key and sample), together with the per-key aggregate, so the statistic stays auditable.
 
 Two consequences to keep in mind: on a **single-library** run the median and the pooled ratio are the same number, so nothing changes there; and on a **multi-library** run the `polyA_frac` values change compared to earlier versions (the pooled value is no longer what the column holds).
 

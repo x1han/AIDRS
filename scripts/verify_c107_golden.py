@@ -40,6 +40,17 @@ The gate fails loudly instead of passing vacuously: a frame whose models
 cannot be matched, a coordinate column that is not integral, or a score cell
 that turned into NaN is a FAIL, never a PASS.
 
+One invariant of the pinned golden, stated per key and not per run: the
+``polyA_frac`` column cannot move as long as at most ONE sample contributes
+reads to a key. The pooled ratio (sum(polyA_freq)/sum(raw_read_freq)) and the
+unweighted median over the qualifying samples coincide in that case, so the
+P1 aggregation is a mathematical no-op for the reference run. Adding a second
+BAM does not automatically move the column -- it moves it for every key that
+the new BAM's reads reach, which is a legitimate re-baseline (record the new
+sha and its cause). The reference sample count is read from the
+quantification header and printed in the receipt, with a warning when it is
+greater than one.
+
 Usage:
     python scripts/verify_c107_golden.py --baseline DIR --candidate DIR
     python scripts/verify_c107_golden.py --candidate DIR --sha-only
@@ -342,6 +353,42 @@ def compare_quant_files(baseline_dir: Path, candidate_dir: Path) -> list:
     return failures
 
 
+# The quantification header carries the id columns first, then one column per
+# library.
+QUANT_ID_COLUMNS = 3
+
+
+def count_reference_samples(output_dir: Path):
+    """Number of libraries in the delivered counts matrix (None if unknown)."""
+    counts = output_dir / "aidrs.transcript.counts.tsv"
+    if not counts.exists():
+        return None
+    try:
+        with open(counts, "r") as fh:
+            header = fh.readline().rstrip("\n").split("\t")
+    except OSError:
+        return None
+    n = len(header) - QUANT_ID_COLUMNS
+    return n if n > 0 else None
+
+
+def print_sample_count(output_dir: Path) -> None:
+    """Print the reference sample count and warn when the golden's invariant
+    (at most one sample contributing reads per key) no longer holds."""
+    n = count_reference_samples(output_dir)
+    if n is None:
+        print("reference sample count: unknown "
+              "(aidrs.transcript.counts.tsv not readable)")
+        return
+    print(f"reference sample count: {n}")
+    if n > 1:
+        print(f"WARNING: the reference run carries {n} libraries. The pinned "
+              "golden's polyA_frac can only stay put while at most one sample "
+              "contributes reads to a key; a second library legitimately moves "
+              "polyA_frac for the keys it reaches and forces a re-baseline "
+              "(record the new sha and its cause).")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="C107 100k regression gate for AIDRS")
     ap.add_argument("--baseline", help="directory with the baseline deliverables")
@@ -363,6 +410,7 @@ def main(argv=None) -> int:
 
     digest = sha256_file(cand_assess)
     print(f"candidate assessment sha256: {digest}")
+    print_sample_count(candidate_dir)
 
     baseline_dir = Path(args.baseline) if args.baseline else None
     base_digest = None

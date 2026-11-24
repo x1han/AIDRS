@@ -222,7 +222,8 @@ class polyAnnotator:
         self._correct_flnc_for_files(df, flnc_files)
         return df
 
-    def _write_per_sample_sidecar(self, per_sample: pd.DataFrame):
+    def _write_per_sample_sidecar(self, per_sample: pd.DataFrame,
+                                  df_polya: pd.DataFrame = None):
         """Write the per-sample poly(A) statistics next to the outputs.
 
         The file is written to the output directory (NOT to temp/, which is
@@ -232,7 +233,20 @@ class polyAnnotator:
         generate_reports.polyA_len_profile scans.
 
         Long format: Chr, Strand, SSC, TrStart, TrEnd, sample, polyA_freq,
-        raw_read_freq, polyA_frac (the per-sample ratio).
+        raw_read_freq, polyA_frac (the per-sample ratio), plus the per-key
+        aggregate that the model frame received:
+        polyA_frac_model (the cohort value for that key), polyA_frac_pooled
+        (the read-depth-weighted value), polyA_n_samples (the number of
+        qualifying samples) and estimator ('median' or 'pooled_fallback').
+        The per-key aggregate is carried on every row of the key so that the
+        audit trail survives delivery: without it a consumer cannot tell
+        whether the delivered polyA_frac came from the median or from the
+        pooled fallback.
+
+        Note that the key space of this file is the Stage 2.3 READ key space,
+        which is a superset of the delivered model (a read whose ends were not
+        snapped to a model keeps its own coordinates), and a model key with no
+        reads at all has no row here.
         """
         output_dir = getattr(self.args, 'output', None) if self.args is not None else None
         if not output_dir:
@@ -249,9 +263,36 @@ class polyAnnotator:
             return
 
         out_path = os.path.join(output_dir, POLYA_PER_SAMPLE_SIDECAR)
-        cols = POLYA_MERGE_COLS + ['sample', 'polyA_freq', 'raw_read_freq', 'polyA_frac']
         table = per_sample.copy()
+
+        if df_polya is not None and len(df_polya) > 0:
+            # Rename BEFORE the merge: the aggregate carries a column named
+            # 'polyA_frac' (the model-level value) and the per-sample ratio is
+            # computed below under the same name. Merging without renaming
+            # would silently drop the aggregate.
+            agg = df_polya[POLYA_MERGE_COLS + ['polyA_frac', 'polyA_frac_pooled',
+                                               'polyA_n_samples']].copy()
+            agg = agg.rename(columns={'polyA_frac': 'polyA_frac_model'})
+            table = table.merge(agg, on=POLYA_MERGE_COLS, how='left',
+                                validate='many_to_one')
+            if len(table) != len(per_sample):
+                raise RuntimeError(
+                    f"[POLYA-SIDECAR] the per-key aggregate changed the row count: "
+                    f"{len(per_sample)} rows became {len(table)}. The aggregate must "
+                    f"hold exactly one row per key."
+                )
+            table['estimator'] = np.where(table['polyA_n_samples'] > 0,
+                                          'median', 'pooled_fallback')
+        else:
+            table['polyA_frac_model'] = np.nan
+            table['polyA_frac_pooled'] = np.nan
+            table['polyA_n_samples'] = 0
+            table['estimator'] = 'pooled_fallback'
+
         table['polyA_frac'] = table['polyA_freq'] / table['raw_read_freq']
+        cols = POLYA_MERGE_COLS + ['sample', 'polyA_freq', 'raw_read_freq', 'polyA_frac',
+                                   'polyA_frac_model', 'polyA_frac_pooled',
+                                   'polyA_n_samples', 'estimator']
         table[cols].to_csv(out_path, sep='\t', index=False)
         logger.info(
             f"[POLYA-SIDECAR] Wrote {len(table)} per-sample poly(A) rows to {out_path}."
@@ -289,12 +330,14 @@ class polyAnnotator:
             per_sample = pd.DataFrame(
                 columns=POLYA_MERGE_COLS + ['sample', 'polyA_freq', 'raw_read_freq'])
 
-        # Audit trail: the per-sample values, written next to the outputs.
-        self._write_per_sample_sidecar(per_sample)
-
         # One row per key: median over the qualifying samples, pooled ratio
         # as the fallback and as the audit value.
         df_polya = aggregate_polya(per_sample)
+
+        # Audit trail: the per-sample values plus the per-key aggregate,
+        # written next to the outputs (the aggregate is needed to know which
+        # estimator produced the delivered polyA_frac).
+        self._write_per_sample_sidecar(per_sample, df_polya)
 
         # Perform correction and annotation
         df = self.add_polya_frac(df, df_polya)

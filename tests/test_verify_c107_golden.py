@@ -329,3 +329,51 @@ def test_minus_strand_uses_trend_as_the_five_prime_end(tmp_path):
     cand2.loc[cand2["TrID"] == "GeneM3_Tr0", "TrEnd"] = 1004
     c2 = _write_dir(tmp_path, "cand2", cand2)
     assert vgate.main(["--baseline", str(b), "--candidate", str(c2)]) == 1
+
+
+# --- the reference sample count guard --------------------------------------
+#
+# The pinned golden's polyA_frac can only stay put while at most one library
+# contributes reads to a key, so the gate prints the library count (read from
+# the quantification header) and warns when the reference run is multi-library.
+
+def _write_counts_with_libraries(d, n_libraries):
+    header = ["TrID", "GeneID", "GeneName"] + [f"lib{i}.bam" for i in range(n_libraries)]
+    (d / "aidrs.transcript.counts.tsv").write_text("\t".join(header) + "\n")
+
+
+def test_the_reference_sample_count_comes_from_the_quantification_header(tmp_path):
+    d = tmp_path / "cand"
+    d.mkdir()
+    _write_counts_with_libraries(d, 1)
+    assert vgate.count_reference_samples(d) == 1
+    _write_counts_with_libraries(d, 6)
+    assert vgate.count_reference_samples(d) == 6
+
+
+def test_a_multi_library_reference_run_is_flagged(tmp_path, capsys):
+    d = tmp_path / "cand"
+    d.mkdir()
+    _write_counts_with_libraries(d, 6)
+    vgate.print_sample_count(d)
+    out = capsys.readouterr().out
+    assert "reference sample count: 6" in out
+    assert "WARNING" in out
+
+
+def test_a_single_library_reference_run_is_not_flagged(tmp_path, capsys):
+    d = tmp_path / "cand"
+    d.mkdir()
+    _write_counts_with_libraries(d, 1)
+    vgate.print_sample_count(d)
+    out = capsys.readouterr().out
+    assert "reference sample count: 1" in out
+    assert "WARNING" not in out
+
+
+def test_an_unreadable_quantification_file_is_reported_as_unknown(tmp_path, capsys):
+    d = tmp_path / "cand"
+    d.mkdir()
+    vgate.print_sample_count(d)
+    out = capsys.readouterr().out
+    assert "unknown" in out

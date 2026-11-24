@@ -15,6 +15,10 @@ Pinned contracts:
   merge must not change the model's row count.
 - ``polyA_frac_pooled`` / ``polyA_n_samples`` stay unregistered, so the
   delivered assessment column set does not change.
+- The delivered per-sample sidecar carries the per-key aggregate as well
+  (``polyA_frac_model``, ``polyA_frac_pooled``, ``polyA_n_samples``,
+  ``estimator``), so the audit trail survives the deletion of ``temp/`` and a
+  consumer can tell which estimator produced the delivered ``polyA_frac``.
 """
 import argparse
 import glob
@@ -241,12 +245,58 @@ def test_the_per_sample_sidecar_is_written_next_to_the_outputs(tmp_path):
     assert sidecar.exists()
     table = pd.read_csv(sidecar, sep="\t")
     assert list(table.columns) == POLYA_MERGE_COLS + [
-        "sample", "polyA_freq", "raw_read_freq", "polyA_frac"]
+        "sample", "polyA_freq", "raw_read_freq", "polyA_frac",
+        "polyA_frac_model", "polyA_frac_pooled", "polyA_n_samples", "estimator"]
     assert len(table) == 1
     assert table["sample"].iloc[0] == "S1"
     assert table["polyA_freq"].iloc[0] == 10
     assert table["polyA_frac"].iloc[0] == pytest.approx(1.0)
     assert df["polyA_frac"].iloc[0] == pytest.approx(1.0)
+
+
+def test_the_sidecar_carries_the_per_key_aggregate(tmp_path):
+    """The audit trail must survive the delivery: the sidecar carries the
+    value the model received, the pooled value, the number of qualifying
+    samples and which estimator was used."""
+    out_dir = tmp_path / "out"
+    (out_dir / "temp").mkdir(parents=True)
+    _write_flnc_mixed(out_dir / "temp" / "S1_flnc.ssc", 10)
+    _write_flnc_mixed(out_dir / "temp" / "S2_flnc.ssc", 100, n_missing=900)
+
+    anno = polyAnnotator(_args(out_dir))
+    df = anno.anno_polya(
+        _model_frame(),
+        [str(out_dir / "temp" / "S1_flnc.ssc"), str(out_dir / "temp" / "S2_flnc.ssc")],
+    )
+
+    table = pd.read_csv(out_dir / POLYA_PER_SAMPLE_SIDECAR, sep="\t")
+    # one row per (key, sample): the merge must not multiply rows
+    assert len(table) == 2
+    assert not table.duplicated(subset=POLYA_MERGE_COLS + ["sample"]).any()
+
+    # the per-key aggregate is on every row of the key
+    assert table["polyA_frac_model"].nunique() == 1
+    assert table["polyA_frac_model"].iloc[0] == pytest.approx(df["polyA_frac"].iloc[0])
+    assert table["polyA_frac_pooled"].iloc[0] == pytest.approx(
+        df["polyA_frac_pooled"].iloc[0])
+    assert table["polyA_n_samples"].iloc[0] == df["polyA_n_samples"].iloc[0]
+    assert set(table["estimator"].unique()) == {"median"}
+
+
+def test_the_sidecar_flags_the_pooled_fallback(tmp_path):
+    """No sample qualifies (every sample is below the read floor) => the
+    value is the pooled fallback, and the sidecar must say so."""
+    out_dir = tmp_path / "out"
+    (out_dir / "temp").mkdir(parents=True)
+    _write_flnc_mixed(out_dir / "temp" / "S1_flnc.ssc", POLYA_MIN_READS - 2)
+
+    anno = polyAnnotator(_args(out_dir))
+    df = anno.anno_polya(_model_frame(), [str(out_dir / "temp" / "S1_flnc.ssc")])
+
+    table = pd.read_csv(out_dir / POLYA_PER_SAMPLE_SIDECAR, sep="\t")
+    assert table["estimator"].iloc[0] == "pooled_fallback"
+    assert table["polyA_n_samples"].iloc[0] == 0
+    assert table["polyA_frac_model"].iloc[0] == pytest.approx(df["polyA_frac"].iloc[0])
 
 
 def test_the_sidecar_is_not_picked_up_by_the_flnc_correct_glob(tmp_path):
