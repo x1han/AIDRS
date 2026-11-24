@@ -11,6 +11,18 @@ import logging
 logger = logging.getLogger("AIDRS")
 
 
+def _cols_with_optional_pt(df, required):
+    """Column selection where only ``read_polyA_len`` may be absent.
+
+    The read arrays and the other key columns must be present: making them
+    optional would turn a missing column into a silently empty frame.
+    """
+    cols = list(required)
+    if 'read_polyA_len' in df.columns:
+        cols.append('read_polyA_len')
+    return cols
+
+
 class MappingToReference:
     def __init__(self, 
                  error_sites_ratio=0.02,           # Using _ref parameter
@@ -143,7 +155,7 @@ class MappingToReference:
         Correct transcripts for a chromosome.
         """
         if df.empty:
-            return df[['Chr', 'Strand', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'Group']]
+            return df[_cols_with_optional_pt(df, ['Chr', 'Strand', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'Group'])]
 
         df = df.copy()
         df['SSC2'] = df['SSC'].str.split('-').map(lambda x: tuple(map(int, x)))
@@ -257,12 +269,17 @@ class MappingToReference:
         df['key'] = df['Chr'].astype(str) + df['Strand'].astype(str) + '_' + df['SSC']
         df['SSC'] = df.apply(lambda row: self.correct_ssc(row, correct_dict, df), axis=1)
 
-        df = df[df['source'] == 'data'][['Chr', 'Strand', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'Group']]
+        df = df[df['source'] == 'data'][_cols_with_optional_pt(df, ['Chr', 'Strand', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'Group'])]
         df[['Chr', 'Strand']] = df[['Chr', 'Strand']].astype(str)
-        df = df.groupby(['Chr', 'Strand', 'SSC', 'Group'], as_index=False).agg({
+        # The per-read poly(A) tail lengths are concatenated exactly like the
+        # read arrays, so they stay parallel to them.
+        agg = {
             'TrStart_reads': lambda x: np.concatenate(x.values),
             'TrEnd_reads': lambda x: np.concatenate(x.values)
-            })
+            }
+        if 'read_polyA_len' in df.columns:
+            agg['read_polyA_len'] = lambda x: np.concatenate(x.values)
+        df = df.groupby(['Chr', 'Strand', 'SSC', 'Group'], as_index=False).agg(agg)
         df['Chr'] = pd.Categorical(df['Chr'])
         df['Strand'] = pd.Categorical(df['Strand'])
 
@@ -273,7 +290,7 @@ class MappingToReference:
         """
         Correct transcripts using reference annotation.
         """
-        df = df[['Chr', 'Strand', 'SSC', 'category', 'TrStart_reads', 'TrEnd_reads']].copy()
+        df = df[_cols_with_optional_pt(df, ['Chr', 'Strand', 'SSC', 'category', 'TrStart_reads', 'TrEnd_reads'])].copy()
         df['key'] = df['Chr'].astype(str) + df['Strand'].astype(str) + '_' + df['SSC'].astype(str)
 
         ref_anno = ref_anno[['Chr', 'Strand', 'SSC']].copy()
@@ -281,13 +298,14 @@ class MappingToReference:
         ref_anno['category'] = 'FSM'
         ref_anno['TrStart_reads'] = np.empty((len(ref_anno), 0)).tolist()
         ref_anno['TrEnd_reads'] = np.empty((len(ref_anno), 0)).tolist()
+        ref_anno['read_polyA_len'] = np.empty((len(ref_anno), 0), dtype=np.int32).tolist()
 
         ref_anno = ref_anno[~ref_anno['key'].isin(df['key'])]
         
         if ref_anno.empty:
             gene_clustering = GeneClustering(num_processes=self.num_processes)
             df = gene_clustering.cluster(df)
-            return df[['Chr', 'Strand', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'Group']]
+            return df[_cols_with_optional_pt(df, ['Chr', 'Strand', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'Group'])]
         
         else:
             df['source'] = 'data'
@@ -306,7 +324,7 @@ class MappingToReference:
             df = df[df.set_index(['Chr', 'Strand', 'Group']).index.isin(valid_groups)]
 
             if df.empty:
-                return df[['Chr', 'Strand', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'Group']]
+                return df[_cols_with_optional_pt(df, ['Chr', 'Strand', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'Group'])]
 
             chr_grouped = [chr_group for _, chr_group in df.groupby(['Chr', 'Strand'], observed=True)]
             with mp.Pool(self.num_processes) as pool:

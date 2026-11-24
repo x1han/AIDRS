@@ -17,6 +17,48 @@ import pysam
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Per-read poly(A) tail length encoding (Dorado 'pt:i' tag).
+#
+# Four distinct states are encoded into the single 'polyA_len' column:
+#     > 0  : measured poly(A) tail length
+#     = 0  : primer anchor found, tail length inestimable
+#     = -1 : primer anchor NOT found
+#     = -2 : no 'pt' tag at all (poly(A) was never measured)
+# Only a strictly positive value is evidence of a measured tail; every other
+# state means "no measurement" and must not be counted as one.
+# ---------------------------------------------------------------------------
+POLYA_LEN_TAG_MISSING = -2
+POLYA_LEN_ANCHOR_NOT_FOUND = -1
+
+
+def encode_polya_len(tags):
+    """Encode one read's BAM tags into its per-read poly(A) length.
+
+    Parameters
+    ----
+    tags : iterable of (name, value, type) tuples
+        The read's BAM tags.
+
+    Returns
+    ----
+    int
+        The measured tail length when the 'pt' tag carries one (> 0),
+        0 for 'pt == 0' (anchor found, length inestimable), -1 for
+        'pt == -1' (anchor not found) and -2 when the 'pt' tag is
+        absent altogether.
+    """
+    pt = next((t[1] for t in tags if t[0] == 'pt'), None)
+    if pt is None:
+        return POLYA_LEN_TAG_MISSING
+    pt = int(pt)
+    if pt > 0:
+        return pt
+    if pt == 0:
+        return 0
+    return POLYA_LEN_ANCHOR_NOT_FOUND
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert BAM to SSC format")
     parser.add_argument("--reference", "-r", help="reference genome in FASTA format", type=str)
@@ -227,17 +269,14 @@ def process_bam_chunk(bam, fasta_file, temp_dir, out_dir, threads, chunk_idx, st
                 else:
                     str_pos = 'NA'
 
-            polya_len = next((t[1] for t in read.tags if t[0] == 'pt'), None)
-            # Dorado pt:i sentinel semantics:
-            #   >0  = estimated poly(A/T) tail length
-            #   =0  = primer anchor found, length inestimable
-            #   =-1 = primer anchor NOT found (treat as missing -> 0)
-            polya_len = max(0, int(polya_len)) if polya_len is not None else 0
+            polya_len = encode_polya_len(read.tags)
             # Propagate per-BAM "has any pt tag" so aidrs.py can auto-skip
             # polyAnnotator on BAMs where basecaller didn't emit polyA info
-            # (e.g. older Dorado). Only set True when we see a real pt tag;
-            # polya_len=0 from "tag missing" must NOT count.
-            if polya_len > 0 or any(t[0] == 'pt' for t in read.tags):
+            # (e.g. older Dorado). Only set True when we see a real pt tag.
+            # Keyed on tag PRESENCE, not on the encoded value: this is not a
+            # behaviour change (before, 'polya_len > 0 or tag present' was
+            # equivalent to 'tag present' as well).
+            if any(t[0] == 'pt' for t in read.tags):
                 has_pt = True
 
             out1_fh.write(f'{read.query_name}.m{id_count[read.query_name]}\t'
@@ -473,13 +512,14 @@ def process_bam_chunk_fast(bam, fasta_file, temp_dir, out_dir, threads, chunk_id
                     else:
                         str_pos = 'NA'
 
-                polya_len = next((t[1] for t in read.tags if t[0] == 'pt'), None)
-                polya_len = max(0, int(polya_len)) if polya_len is not None else 0
+                polya_len = encode_polya_len(read.tags)
                 # Propagate per-BAM "has any pt tag" so aidrs.py can auto-skip
                 # polyAnnotator on BAMs where basecaller didn't emit polyA info
-                # (e.g. older Dorado). Only set True when we see a real pt tag;
-                # polya_len=0 from "tag missing" must NOT count.
-                if polya_len > 0 or any(t[0] == 'pt' for t in read.tags):
+                # (e.g. older Dorado). Only set True when we see a real pt tag.
+                # Keyed on tag PRESENCE, not on the encoded value: this is not a
+                # behaviour change (before, 'polya_len > 0 or tag present' was
+                # equivalent to 'tag present' as well).
+                if any(t[0] == 'pt' for t in read.tags):
                     has_pt = True
 
                 out1_fh.write(f'{read.query_name}.m{id_count[read.query_name]}\t'
@@ -530,7 +570,7 @@ def merge_single_bam(bam, files, out_dir):
     out1 = os.path.join(out_dir, f'{bam_basename}_flnc.ssc')
     out2 = os.path.join(out_dir, f'{bam_basename}_ssc.count')
     # Sentinel file: aidrs.py reads this to decide whether to skip polyAnnotator
-    # end-to-end (no 'pt' tag → all reads had polya_len=0 from missing tag,
+    # end-to-end (no 'pt' tag → all reads had polya_len=-2 from the missing tag,
     # so polyA aggregation would just produce all-zero polyA_frac, polluting
     # downstream Stage 2.6 3-state filter).
     out_has_polya = os.path.join(out_dir, f'{bam_basename}.has_polya')

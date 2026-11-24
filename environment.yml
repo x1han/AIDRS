@@ -21,5 +21,10 @@ dependencies:
   - polars=1.33
   - gffutils
   - tqdm
+  # imported by src/get_terminal_sites.py (3' end estimation) and pulled in
+  # transitively by the test suite -- pinned explicitly so a fresh environment
+  # does not depend on another package's resolution
+  - scikit-learn
+  - scipy
   # test runner (Layer-1 defensive unit + integration tests)
   - pytest>=8.0

@@ -653,7 +653,7 @@ class SSCGraphFilter:
         correct_paths.update(all_temp_corrections)
 
         # 5. Filter paths based on final correction rules
-        columns_to_keep = ['Chr', 'Strand', 'Group', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'SSC2', 'frequency', 'SSC_extend_str', 'SSC_extend', 'category']
+        columns_to_keep = ['Chr', 'Strand', 'Group', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'SSC2', 'frequency', 'SSC_extend_str', 'SSC_extend', 'category', 'read_polyA_len']
         if 'junction' in df_subgraph_corr.columns: columns_to_keep.append('junction')
         df_subgraph_corr = df_subgraph_corr[[col for col in columns_to_keep if col in df_subgraph_corr.columns]].copy()
 
@@ -822,7 +822,13 @@ class SSCGraphFilter:
         # Ensure consistent column order
         if 'category' in df.columns:
             df = df.drop(columns=['category'])
-        df = df[['Chr', 'Strand', 'Group', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'frequency']].copy()
+        # Only read_polyA_len is optional (a frame produced before the pt
+        # column existed); the read arrays and the frequency must be present,
+        # so a missing one still raises instead of silently disappearing.
+        keep = ['Chr', 'Strand', 'Group', 'SSC', 'TrStart_reads', 'TrEnd_reads', 'frequency']
+        if 'read_polyA_len' in df.columns:
+            keep.append('read_polyA_len')
+        df = df[keep].copy()
         return df
     
     def filter_without_reference(self, df, num_processes=None):

@@ -151,12 +151,18 @@ def process_data(flnc_path, count_path, df_raw_path, min_aln_coverage=None, min_
 
     df_grouped = (
         df_flnc.groupby(["Chr", "Strand", "SSC"], observed=True)
-        .agg({"TrStart_reads": list, "TrEnd_reads": list})
+        .agg({"TrStart_reads": list, "TrEnd_reads": list, "polyA_len": list})
         .reset_index()
     )
 
     df_grouped["TrStart_reads"] = df_grouped["TrStart_reads"].apply(lambda x: np.array(x, dtype=np.int32))
     df_grouped["TrEnd_reads"] = df_grouped["TrEnd_reads"].apply(lambda x: np.array(x, dtype=np.int32))
+    # Per-read poly(A) tail lengths (Dorado 'pt'). Renamed to read_polyA_len to
+    # keep it apart from the Stage-2.3 polyA_len sidecar semantics. The
+    # groupby .agg keeps the within-group row order across the aggregated
+    # columns, so this array stays parallel to TrStart_reads/TrEnd_reads.
+    df_grouped = df_grouped.rename(columns={"polyA_len": "read_polyA_len"})
+    df_grouped["read_polyA_len"] = df_grouped["read_polyA_len"].apply(lambda x: np.array(x, dtype=np.int32))
     df_grouped["frequency"] = df_grouped["TrStart_reads"].apply(len)
     df_grouped.to_parquet(df_raw_path)
 
@@ -765,6 +771,53 @@ def correct_flnc(ref_df: pd.DataFrame,
 
     return out_df
 
+def assert_pt_parallel(merged_df, trstart_cols):
+    """Check that every sample's per-read poly(A) array is present and parallel
+    to that sample's read arrays; return the per-sample pt columns in the same
+    order as ``trstart_cols``.
+
+    Fail loud on purpose: a sample whose read arrays survive but whose pt
+    column does not would silently disable the A2'/A2'-b 3'-end
+    re-estimation for that sample -- no error, no log line, and an output
+    that looks unchanged (the feature is simply inert). The message names the
+    offending sample.
+    """
+    pt_cols = []
+    missing_pt = []
+    for col in trstart_cols:
+        sample = col[:-len('_TrStart_reads')]
+        pt_col = f'{sample}_read_polyA_len'
+        if pt_col in merged_df.columns:
+            pt_cols.append(pt_col)
+        else:
+            missing_pt.append(sample)
+    if missing_pt:
+        raise RuntimeError(
+            "read_polyA_len is missing for sample(s) that still have read arrays: "
+            + ", ".join(sorted(missing_pt))
+            + ". The poly(A)-aware 3'-end re-estimation would be silently disabled "
+              "for those samples."
+        )
+
+    # One Python-level pass per sample (instead of two pandas applies): this
+    # runs once per sample over the whole merged frame, so the row count is
+    # large on multi-library deliveries.
+    for col in trstart_cols:
+        sample = col[:-len('_TrStart_reads')]
+        bad = 0
+        for a, b in zip(merged_df[col].values, merged_df[f'{sample}_read_polyA_len'].values):
+            la = len(a) if isinstance(a, np.ndarray) else 0
+            lb = len(b) if isinstance(b, np.ndarray) else 0
+            if la != lb:
+                bad += 1
+        if bad:
+            raise RuntimeError(
+                f"read_polyA_len is not parallel to the read arrays for sample '{sample}': "
+                f"{bad} row(s) mismatch"
+            )
+    return pt_cols
+
+
 def rescue_low_frep_reads(merged_df, df_dict, args):
     """
     Rescue low frequency reads by replacing zero frequency entries with data from flnc files.
@@ -782,7 +835,11 @@ def rescue_low_frep_reads(merged_df, df_dict, args):
     for sample, _ in df_dict.items():
         flnc_path = os.path.join(args.output, f"temp/{sample}.ssc_flnc.parquet")
         rescue_cols = [f'{sample}_TrStart_reads', f'{sample}_TrEnd_reads', f'{sample}_frequency']
-        
+        if f'{sample}_read_polyA_len' in merged_df.columns:
+            # The rescued read arrays come from the same parquet row, so the
+            # per-read poly(A) tail lengths are exactly parallel to them.
+            rescue_cols.append(f'{sample}_read_polyA_len')
+
         rescue_df = merged_df[['Chr', 'Strand', 'SSC'] + rescue_cols].copy()
         flnc_df = pd.read_parquet(flnc_path).dropna()
         
@@ -794,7 +851,8 @@ def rescue_low_frep_reads(merged_df, df_dict, args):
             flnc_renamed = flnc_df.rename(columns={
                 'TrStart_reads': f'{sample}_TrStart_reads',
                 'TrEnd_reads': f'{sample}_TrEnd_reads',
-                'frequency': f'{sample}_frequency'
+                'frequency': f'{sample}_frequency',
+                'read_polyA_len': f'{sample}_read_polyA_len'
             })
             
             # Only keep flnc rows that match zero_rows keys (Chr, Strand, SSC)
